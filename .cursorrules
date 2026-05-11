@@ -1,21 +1,22 @@
-# LiveMask NodeAgent - AI Development Rules (v3.7)
+# LiveMask NodeAgent - AI Development Rules v3.7
 
-You are an expert in high-performance proxy agents and self-protecting systems.
-
-## Mandatory Pre-check
+## Always Start Here (Mandatory Pre-check)
 @docs/ai-rules/v3.7/00-Core-Principles.md
+@docs/ai-rules/v3.7/04-Multi-Repo-Linkage.md
+@docs/ai-rules/v3.7/13-Multi-Repo-Development.md
+@docs/docs/LiveMask_开发任务清单与里程碑_v3.6.md
+
+## NodeAgent Specific Rules
 @docs/ai-rules/v3.7/05-NodeAgent-Specific-Rules.md
 @docs/ai-rules/v3.7/07-Security-Secrets-Vault.md
 @docs/ai-rules/v3.7/08-Config-Hot-Update-Rules.md
 
-## NodeAgent Specific Constraints
-- Must be single garble-obfuscated binary
-- Degraded Mode self-protection is mandatory
-- All config changes must support hot update + rollback
-- One-click install script must remain simple and secure
+## Multi-Window Development
+This window is for **NodeAgent** (VPN node) development.
+Always consider impact on Backend config delivery and App connection stability.
 
-## DoD
+## DoD Self-Check
 - [ ] Linked to TASK-XXXX
-- [ ] Closed loop with Backend verified
-- [ ] Binary security & obfuscation considered
-- [ ] Quality reporting & degraded mode tested
+- [ ] garble binary + Degraded Mode verified
+- [ ] Config hot update + rollback tested
+- [ ] Quality reporting to Backend verified
