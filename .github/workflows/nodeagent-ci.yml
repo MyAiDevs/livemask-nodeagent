@@ -1,0 +1,15 @@
+name: NodeAgent CI
+
+on:
+  pull_request:
+  repository_dispatch:
+    types:
+      - docs-contract-changed
+
+jobs:
+  test:
+    runs-on: [self-hosted, livemask, docker]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: go test ./...
