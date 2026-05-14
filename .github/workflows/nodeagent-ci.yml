@@ -8,8 +8,23 @@ on:
 
 jobs:
   test:
-    runs-on: [self-hosted, livemask, docker]
+    runs-on:
+      group: livemask-ci
+      labels: [self-hosted, linux, livemask, docker, ci]
     steps:
       - uses: actions/checkout@v4
       - name: Test
         run: go test ./...
+
+  notify-lark:
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notify Lark
+        env:
+          LARK_BOT_WEBHOOK: ${{ secrets.LARK_BOT_WEBHOOK }}
+          LARK_BOT_SECRET: ${{ secrets.LARK_BOT_SECRET }}
+          WORKFLOW_RESULT: ${{ needs.test.result }}
+        run: bash .github/scripts/lark-notify.sh "$WORKFLOW_RESULT"
