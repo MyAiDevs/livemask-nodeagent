@@ -5,10 +5,10 @@
 ## Quick Start
 
 ```bash
-git clone https://github.com/sammytan/livemask-nodeagent.git
+git clone https://github.com/MyAiDevs/livemask-nodeagent.git
 cd livemask-nodeagent
 
-git submodule add https://github.com/sammytan/livemask-docs.git docs
+git submodule add https://github.com/MyAiDevs/livemask-docs.git docs
 git submodule update --init --recursive
 bash scripts/sync-ai-rules.sh
 ```
@@ -28,4 +28,4 @@ Key modules for NodeAgent:
 - Config & hot update from Backend
 - Quality reporting to Backend & Recommendation Engine
 
-Central docs: https://github.com/sammytan/livemask-docs
+Central docs: https://github.com/MyAiDevs/livemask-docs

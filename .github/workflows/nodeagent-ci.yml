@@ -6,6 +6,10 @@ on:
     types:
       - docs-contract-changed
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   test:
     runs-on:
@@ -14,7 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test
-        run: go test ./...
+        run: |
+          if [[ ! -f go.mod ]]; then
+            echo "go.mod not found; scaffold repository, skip Go tests."
+            exit 0
+          fi
+          go test ./...
 
   notify-lark:
     needs: [test]
