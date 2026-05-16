@@ -1,0 +1,34 @@
+name: Promote to CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch staging promotion
+        if: github.event_name == 'push'
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN }}
+          repository: MyAiDevs/livemask-ci-cd
+          event-type: staging-promote
+          client-payload: '{"source_repo":"livemask-nodeagent","ref":"main","sha":"${{ github.sha }}"}'
+
+      - name: Dispatch production release
+        if: github.event_name == 'release'
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN }}
+          repository: MyAiDevs/livemask-ci-cd
+          event-type: production-release
+          client-payload: '{"source_repo":"livemask-nodeagent","ref":"${{ github.event.release.tag_name }}","sha":"${{ github.sha }}","release_url":"${{ github.event.release.html_url }}"}'

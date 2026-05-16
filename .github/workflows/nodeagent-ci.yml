@@ -2,6 +2,12 @@ name: NodeAgent CI
 
 on:
   pull_request:
+    branches:
+      - dev
+      - main
+  push:
+    branches:
+      - dev
   repository_dispatch:
     types:
       - docs-contract-changed
@@ -18,6 +24,8 @@ jobs:
       labels: [self-hosted, linux, livemask, docker, ci]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.target_branch || github.ref }}
       - name: Test
         run: |
           if [[ ! -f go.mod ]]; then

@@ -14,6 +14,9 @@
 
 ## Multi-Window Development
 This window is for **NodeAgent** (VPN node) development.
+Always start from `dev`. If local `dev` does not exist, create it from `origin/dev` or `origin/main`.
+Never implement daily development directly on `main`; `main` is staging/pre-release only.
+Production work must come from a GitHub Release / `v*` tag, not from an ad hoc branch.
 Always consider impact on Backend config delivery and App connection stability.
 
 ## Task Completion Report
