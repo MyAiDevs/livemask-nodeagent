@@ -1,22 +1,19 @@
-// TASK-NODE-001 — NodeAgent registration, heartbeat, and system metrics.
+// TASK-NODE-001 — NodeAgent registration, heartbeat, HMAC auth, and system metrics.
 //
 // This binary wires up both the config subsystem (TASK-NA-CONFIG-001) and
-// the agent registration/heartbeat subsystem (TASK-NODE-001):
+// the agent registration/heartbeat subsystem (TASK-NODE-001).
 //
-//   - Fetch runtime config from Backend config centre
-//   - Validate schema, version, hash, payload
-//   - Persist last-known-good to disk cache
-//   - Apply changes to runtime reporting/degraded-mode/singbox settings
-//   - Background polling with jitter and exponential backoff
-//   - Register with Backend on startup via POST /internal/agent/register
-//   - Periodic heartbeat via POST /internal/agent/heartbeat
-//   - System metrics collection (CPU, memory, load)
-//   - Serve HTTP status endpoints for config and agent observability
+// Identity lifecycle:
+//   1. First start → POST /internal/agent/register → save node_id+node_secret
+//   2. Subsequent starts → load identity from IDENTITY_PATH, skip register
+//   3. Heartbeat uses HMAC-SHA256(node_id:timestamp, key=node_secret)
 //
 // Usage:
 //
 //	BACKEND_BASE_URL=http://backend:8080 \
-//	NODE_ID=xxx AGENT_VERSION=v0.1.0 \
+//	AGENT_VERSION=v0.1.0 \
+//	NODE_NAME=my-server-1 \
+//	IDENTITY_PATH=/var/lib/nodeagent/identity.json \
 //	CONFIG_CACHE_PATH=/var/lib/nodeagent/config-cache.json \
 //	POLL_INTERVAL_SEC=60 \
 //	HEARTBEAT_INTERVAL_SEC=30 \
@@ -47,8 +44,9 @@ func main() {
 
 	// ---- Environment configuration ----
 	backendBaseURL := mustEnv("BACKEND_BASE_URL")
-	nodeID := mustEnv("NODE_ID")
 	agentVersion := mustEnv("AGENT_VERSION")
+	nodeName := envOrDefault("NODE_NAME", "nodeagent")
+	identityPath := envOrDefault("IDENTITY_PATH", "identity.json")
 	cachePath := envOrDefault("CONFIG_CACHE_PATH", "config-cache.json")
 	listenAddr := envOrDefault("LISTEN_ADDR", ":9100")
 	pollIntervalSec := envIntOrDefault("POLL_INTERVAL_SEC", 60)
@@ -56,18 +54,13 @@ func main() {
 	pollInterval := time.Duration(pollIntervalSec) * time.Second
 	heartbeatInterval := time.Duration(heartbeatIntervalSec) * time.Second
 
-	// Normalize base URL.
 	backendBaseURL = strings.TrimRight(backendBaseURL, "/")
 
-	// ---- Build the config subsystem ----
-	// 1) Config HTTP client — points to the config endpoint.
+	// ---- Build the config subsystem (same as TASK-NA-CONFIG-001) ----
 	configURL := backendBaseURL + "/internal/agent/config"
-	cfgClient := config.NewClient(configURL, nodeID, agentVersion)
-
-	// 2) Disk cache for last-known-good.
+	cfgClient := config.NewClient(configURL, "", agentVersion)
 	cfgStore := config.NewStore(cachePath)
 
-	// 3) Runtime applier callback.
 	applier := config.NewRuntimeApplier(func(old, new *config.RuntimeConfig) error {
 		log.Printf("[config] **** Applying config change ****")
 		log.Printf("[config]   heartbeat_interval:        %d -> %d",
@@ -85,19 +78,33 @@ func main() {
 		log.Printf("[config] **** Config applied successfully ****")
 		return nil
 	})
-
-	// 4) Config Manager.
 	cfgMgr := config.NewManager(cfgClient, cfgStore, applier)
 
 	// ---- Build the agent subsystem ----
-	// 5) Agent HTTP client.
-	agentClient := agent.NewClient(backendBaseURL, nodeID, agentVersion)
-
-	// 6) System metrics collector.
+	agentClient := agent.NewClient(backendBaseURL, agentVersion)
 	sysCollector := agent.NewSystemCollector()
+	identityStore := agent.NewIdentityStore(identityPath)
 
-	// 7) Agent Manager — cfgMgr implements ConfigProvider.
-	agentMgr := agent.NewManager(agentClient, sysCollector, cfgMgr)
+	// Agent Manager — cfgMgr implements ConfigProvider.
+	agentMgr := agent.NewManager(agentClient, sysCollector, cfgMgr, identityStore)
+
+	// ---- Identity lifecycle ----
+	// 1. Attempt to load persisted identity (node_id + node_secret).
+	hadIdentity := agentMgr.LoadIdentity()
+
+	// 2. If no identity yet, register for the first time.
+	if !hadIdentity {
+		log.Println("[main] No persisted identity — registering with Backend")
+		registerCtx, registerCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if regErr := agentMgr.Register(registerCtx, nodeName); regErr != nil {
+			log.Printf("[main] Registration failed (continuing in degraded mode): %v", regErr)
+		} else {
+			log.Printf("[main] Registration successful, node_id=%s", agentMgr.Status().NodeID)
+		}
+		registerCancel()
+	} else {
+		log.Printf("[main] Identity loaded — skipping registration")
+	}
 
 	// ---- Startup: load last-known-good config, then sync ----
 	loaded := cfgMgr.LoadLastKnownGood()
@@ -119,28 +126,27 @@ func main() {
 		log.Printf("[main] Config is current (version %d)", cfgMgr.Status().ConfigVersion)
 	}
 
-	// Register with Backend (non-fatal on failure).
-	registerCtx, registerCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if regErr := agentMgr.Register(registerCtx); regErr != nil {
-		log.Printf("[main] Registration failed (continuing in degraded mode): %v", regErr)
-	} else {
-		log.Printf("[main] Registration successful")
-	}
-	registerCancel()
-
 	// ---- Background polling (config + heartbeat) ----
 	cfgMgr.StartPoll(pollInterval)
 	log.Printf("[main] Config polling started (interval=%v)", pollInterval)
 
-	agentMgr.StartHeartbeatLoop(heartbeatInterval)
-	log.Printf("[main] Heartbeat loop started (interval=%v)", heartbeatInterval)
+	if hadIdentity || agentMgr.Status().Registered {
+		agentMgr.StartHeartbeatLoop(heartbeatInterval)
+		log.Printf("[main] Heartbeat loop started (interval=%v)", heartbeatInterval)
+	} else {
+		log.Println("[main] Heartbeat loop NOT started (no node identity)")
+	}
 
 	// ---- HTTP status endpoints ----
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := "ok"
-		if cfgMgr.Status().IsDegraded || !agentMgr.Status().LastHeartbeatOK {
+		agentStatus := agentMgr.Status()
+		if cfgMgr.Status().IsDegraded || (agentStatus.HeartbeatsSent > 0 && !agentStatus.LastHeartbeatOK) {
+			status = "degraded"
+		}
+		if !hadIdentity && !agentStatus.Registered {
 			status = "degraded"
 		}
 		w.WriteHeader(http.StatusOK)

@@ -12,28 +12,35 @@ import (
 )
 
 // Client communicates with Backend for agent register and heartbeat.
+// TASK-NODE-001 — aligned to Backend commit 02794f0.
 type Client struct {
 	httpClient   *http.Client
 	backendURL   string
 	nodeID       string
+	nodeSecret   string
 	agentVersion string
 }
 
 // NewClient creates a new agent Client.
-// backendBaseURL is the base URL of the Backend, e.g. "http://backend:8080".
-func NewClient(backendBaseURL, nodeID, agentVersion string) *Client {
+func NewClient(backendBaseURL, agentVersion string) *Client {
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
 		backendURL:   backendBaseURL,
-		nodeID:       nodeID,
 		agentVersion: agentVersion,
 	}
 }
 
-// Register sends a POST /internal/agent/register request on startup.
-func (c *Client) Register(ctx context.Context) (*RegisterResponse, error) {
+// SetNodeIdentity updates the node credentials used for heartbeat signing.
+func (c *Client) SetNodeIdentity(nodeID, nodeSecret string) {
+	c.nodeID = nodeID
+	c.nodeSecret = nodeSecret
+}
+
+// Register sends POST /internal/agent/register (no auth required).
+// The Backend generates node_id + node_secret if not provided.
+func (c *Client) Register(ctx context.Context, nodeName string) (*RegisterResponse, error) {
 	u, err := url.JoinPath(c.backendURL, "/internal/agent/register")
 	if err != nil {
 		return nil, fmt.Errorf("build register url: %w", err)
@@ -41,8 +48,9 @@ func (c *Client) Register(ctx context.Context) (*RegisterResponse, error) {
 
 	body := RegisterRequest{
 		NodeID:       c.nodeID,
+		NodeSecret:   c.nodeSecret,
+		NodeName:     nodeName,
 		AgentVersion: c.agentVersion,
-		Timestamp:    time.Now().Unix(),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -55,7 +63,6 @@ func (c *Client) Register(ctx context.Context) (*RegisterResponse, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Node-ID", c.nodeID)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -79,18 +86,20 @@ func (c *Client) Register(ctx context.Context) (*RegisterResponse, error) {
 	return &registerResp, nil
 }
 
-// Heartbeat sends a POST /internal/agent/heartbeat request.
+// Heartbeat sends POST /internal/agent/heartbeat with HMAC auth headers:
+// X-Node-ID, X-Timestamp, X-Signature.
 func (c *Client) Heartbeat(ctx context.Context, hb *HeartbeatRequest) (*HeartbeatResponse, error) {
 	u, err := url.JoinPath(c.backendURL, "/internal/agent/heartbeat")
 	if err != nil {
 		return nil, fmt.Errorf("build heartbeat url: %w", err)
 	}
 
-	hb.Timestamp = time.Now().Unix()
 	payload, err := json.Marshal(hb)
 	if err != nil {
 		return nil, fmt.Errorf("marshal heartbeat: %w", err)
 	}
+
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
 	if err != nil {
@@ -99,6 +108,11 @@ func (c *Client) Heartbeat(ctx context.Context, hb *HeartbeatRequest) (*Heartbea
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Node-ID", c.nodeID)
+	req.Header.Set("X-Timestamp", timestamp)
+
+	// Signature: HEX(HMAC-SHA256(key=node_secret, msg=nodeID:timestamp))
+	sig := ComputeSignature(c.nodeID, timestamp, c.nodeSecret)
+	req.Header.Set("X-Signature", sig)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

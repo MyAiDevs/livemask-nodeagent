@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-// mockCollector implements MetricsCollector for testing.
 type mockCollector struct{}
 
 func (m *mockCollector) Collect() (*SystemMetrics, error) {
@@ -23,34 +23,69 @@ func (m *mockCollector) Collect() (*SystemMetrics, error) {
 	}, nil
 }
 
-// mockConfigProvider implements ConfigProvider for testing.
 type mockConfigProvider struct {
 	configVersion int
 	configHash    string
 	degraded      bool
 }
 
-func (m *mockConfigProvider) ConfigVersion() int    { return m.configVersion }
-func (m *mockConfigProvider) ConfigHash() string      { return m.configHash }
-func (m *mockConfigProvider) IsDegraded() bool         { return m.degraded }
+func (m *mockConfigProvider) ConfigVersion() int   { return m.configVersion }
+func (m *mockConfigProvider) ConfigHash() string    { return m.configHash }
+func (m *mockConfigProvider) IsDegraded() bool      { return m.degraded }
 
-func TestManager_RegisterSuccess(t *testing.T) {
+func TestManager_LoadIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "identity.json")
+	identityStore := NewIdentityStore(path)
+
+	// Save identity first.
+	_ = identityStore.Save(&Identity{NodeID: "saved-uuid", NodeSecret: "saved-secret"})
+
+	client := NewClient("http://localhost:1", "v1.0")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
+
+	loaded := mgr.LoadIdentity()
+	if !loaded {
+		t.Fatal("expected identity to load")
+	}
+	if mgr.Status().NodeID != "saved-uuid" {
+		t.Fatalf("expected NodeID saved-uuid, got %s", mgr.Status().NodeID)
+	}
+}
+
+func TestManager_LoadIdentityNoFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "identity.json")
+	identityStore := NewIdentityStore(path)
+
+	client := NewClient("http://localhost:1", "v1.0")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
+
+	loaded := mgr.LoadIdentity()
+	if loaded {
+		t.Fatal("expected false when no identity file exists")
+	}
+}
+
+func TestManager_RegisterNewNode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "identity.json")
+	identityStore := NewIdentityStore(path)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/internal/agent/register" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprint(w, `{"node_id":"test-node","status":"active"}`)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"node_id":"new-uuid","node_secret":"new-secret","status":"pending_review"}`)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-node", "v1.0")
-	collector := &mockCollector{}
-	cfgProvider := &mockConfigProvider{configVersion: 3, configHash: "sha256:abc", degraded: false}
-	mgr := NewManager(client, collector, cfgProvider)
+	client := NewClient(server.URL, "v1.0")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
 
-	err := mgr.Register(context.Background())
+	err := mgr.Register(context.Background(), "test-server")
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}
@@ -59,131 +94,133 @@ func TestManager_RegisterSuccess(t *testing.T) {
 	if !status.Registered {
 		t.Fatal("expected registered=true")
 	}
-	if status.NodeStatus != "active" {
-		t.Fatalf("expected status active, got %s", status.NodeStatus)
+	if status.NodeID != "new-uuid" {
+		t.Fatalf("expected NodeID new-uuid, got %s", status.NodeID)
 	}
-	if status.LastRegisterAt == nil {
-		t.Fatal("expected LastRegisterAt to be set")
+
+	// Identity should be persisted.
+	loaded, _ := identityStore.Load()
+	if loaded == nil {
+		t.Fatal("identity should be persisted after registration")
+	}
+	if loaded.NodeID != "new-uuid" {
+		t.Fatalf("expected persisted NodeID new-uuid, got %s", loaded.NodeID)
+	}
+	if loaded.NodeSecret != "new-secret" {
+		t.Fatalf("expected persisted NodeSecret new-secret, got %s", loaded.NodeSecret)
 	}
 }
 
-func TestManager_RegisterFailure(t *testing.T) {
+func TestManager_RegisterFailure_NoExit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "identity.json")
+	identityStore := NewIdentityStore(path)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-node", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{})
+	client := NewClient(server.URL, "v1.0")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
 
-	err := mgr.Register(context.Background())
+	err := mgr.Register(context.Background(), "test-server")
 	if err == nil {
 		t.Fatal("expected register to fail")
 	}
 
-	status := mgr.Status()
-	if status.Registered {
-		t.Fatal("expected registered=false after failure")
-	}
-	if status.LastRegisterErr == "" {
-		t.Fatal("expected LastRegisterErr to be set")
-	}
-}
-
-func TestManager_RegisterNotExiting(t *testing.T) {
-	// Register failure must NOT exit the process — it should enter degraded
-	// mode but allow the agent to continue.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = fmt.Fprint(w, `{"error":"node not found"}`)
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL, "test-node", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{})
-
-	err := mgr.Register(context.Background())
-	if err == nil {
-		t.Fatal("expected register error")
-	}
 	// Agent must still be functional.
 	status := mgr.Status()
-	if !status.IsDeployed {
+	if status.IsDeployed != true {
 		t.Fatal("agent should still be deployed despite register failure")
 	}
 }
 
-func TestManager_SendHeartbeat(t *testing.T) {
-	var heartbeatCount int
+func TestManager_HeartbeatWithHMAC(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "hb-node", NodeSecret: "hb-secret"})
+
+	var capturedSig, capturedTimestamp string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/internal/agent/heartbeat" {
-			heartbeatCount++
+			capturedSig = r.Header.Get("X-Signature")
+			capturedTimestamp = r.Header.Get("X-Timestamp")
 			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprint(w, `{"accepted":true,"server_time":1712345678}`)
+			_, _ = fmt.Fprint(w, `{"ok":true,"server_config_version":5}`)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-node", "v1.0")
-	cfgProvider := &mockConfigProvider{configVersion: 3, configHash: "sha256:abc", degraded: false}
-	mgr := NewManager(client, &mockCollector{}, cfgProvider)
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("hb-node", "hb-secret")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 3, configHash: "sha256:abc"}, identityStore)
 
-	// Send a single heartbeat manually.
+	mgr.LoadIdentity()
 	err := mgr.sendHeartbeat()
 	if err != nil {
 		t.Fatalf("heartbeat failed: %v", err)
 	}
-	if heartbeatCount != 1 {
-		t.Fatalf("expected 1 heartbeat, got %d", heartbeatCount)
+
+	// Verify the HMAC signature.
+	expectedSig := ComputeSignature("hb-node", capturedTimestamp, "hb-secret")
+	if capturedSig != expectedSig {
+		t.Fatalf("HMAC signature mismatch: got %s, expected %s", capturedSig, expectedSig)
 	}
 
 	status := mgr.Status()
 	if status.HeartbeatsSent != 1 {
-		t.Fatalf("expected 1 heartbeat sent, got %d", status.HeartbeatsSent)
-	}
-	if !status.LastHeartbeatOK {
-		t.Fatal("expected heartbeat OK")
-	}
-	if !status.IsDeployed {
-		t.Fatal("expected IsDeployed")
+		t.Fatalf("expected 1 heartbeat, got %d", status.HeartbeatsSent)
 	}
 }
 
 func TestManager_HeartbeatDegraded(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "d-node", NodeSecret: "d-secret"})
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, `{"accepted":true}`)
+		if r.URL.Path == "/internal/agent/heartbeat" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `{"ok":true,"server_config_version":2,"degraded":true}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-node", "v1.0")
-	cfgProvider := &mockConfigProvider{configVersion: 5, degraded: true}
-	mgr := NewManager(client, &mockCollector{}, cfgProvider)
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("d-node", "d-secret")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 5, degraded: true}, identityStore)
+	mgr.LoadIdentity()
 
 	err := mgr.sendHeartbeat()
 	if err != nil {
 		t.Fatalf("heartbeat failed: %v", err)
 	}
 
-	// When config is degraded, heartbeat should report degraded=true.
-	// We can verify this by checking the Status which reads from configProvider.
 	status := mgr.Status()
 	if !status.Degraded {
-		t.Fatal("expected degraded=true when config provider is degraded")
+		t.Fatal("expected degraded=true")
 	}
 }
 
-func TestManager_HeartbeatBackendFailure(t *testing.T) {
-	// Simulate Backend being down — heartbeat must fail gracefully.
+func TestManager_HeartbeatBackendFailure_DegradedRetry(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "f-node", NodeSecret: "f-secret"})
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-node", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1})
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("f-node", "f-secret")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore)
+	mgr.LoadIdentity()
 
 	err := mgr.sendHeartbeat()
 	if err == nil {
@@ -191,32 +228,36 @@ func TestManager_HeartbeatBackendFailure(t *testing.T) {
 	}
 
 	status := mgr.Status()
+	if status.HeartbeatsSent != 1 {
+		t.Fatalf("expected 1 heartbeat, got %d", status.HeartbeatsSent)
+	}
 	if status.LastHeartbeatOK {
-		t.Fatal("expected LastHeartbeatOK=false after failure")
+		t.Fatal("expected LastHeartbeatOK=false")
 	}
 	if status.LastHeartbeatErr == "" {
 		t.Fatal("expected LastHeartbeatErr to be set")
 	}
-
-	// Process must still be functional.
-	if !status.IsDeployed {
-		t.Fatal("agent should still be deployed despite heartbeat failure")
-	}
 }
 
 func TestManager_HeartbeatLoopStartStop(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "l-node", NodeSecret: "l-secret"})
+
 	var hbCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/internal/agent/heartbeat" {
 			hbCount++
 			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprint(w, `{"accepted":true}`)
+			_, _ = fmt.Fprint(w, `{"ok":true,"server_config_version":1}`)
 		}
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-node", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1})
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("l-node", "l-secret")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore)
+	mgr.LoadIdentity()
 
 	mgr.StartHeartbeatLoop(50 * time.Millisecond)
 	time.Sleep(120 * time.Millisecond)
@@ -227,33 +268,36 @@ func TestManager_HeartbeatLoopStartStop(t *testing.T) {
 	}
 }
 
-func TestManager_StatusSnapshot(t *testing.T) {
-	client := NewClient("http://localhost:1", "test-node", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 7, configHash: "sha256:xyz"})
+func TestManager_SetSingboxStatus(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	client := NewClient("http://localhost:1", "v1.0")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
 
+	mgr.SetSingboxStatus(SingboxStatusRunning)
 	status := mgr.Status()
-	if !status.IsDeployed {
-		t.Fatal("expected IsDeployed=true")
-	}
-	if status.Registered {
-		t.Fatal("expected Registered=false before any register call")
-	}
-	if status.HeartbeatsSent != 0 {
-		t.Fatal("expected 0 heartbeats initially")
+	if status.SingboxStatus != SingboxStatusRunning {
+		t.Fatalf("expected singbox running, got %s", status.SingboxStatus)
 	}
 }
 
 func TestManager_StatusHook(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "h-node", NodeSecret: "h-secret"})
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/internal/agent/heartbeat" {
 			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprint(w, `{"accepted":true}`)
+			_, _ = fmt.Fprint(w, `{"ok":true,"server_config_version":1}`)
 		}
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-node", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1})
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("h-node", "h-secret")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore)
+	mgr.LoadIdentity()
 
 	var hookCalled bool
 	mgr.OnStatusChange(func(s AgentStatus) {
@@ -266,13 +310,20 @@ func TestManager_StatusHook(t *testing.T) {
 	}
 }
 
-func TestManager_SetSingboxStatus(t *testing.T) {
-	client := NewClient("http://localhost:1", "test-node", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{})
+func TestManager_StatusSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	client := NewClient("http://localhost:1", "v1.0")
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 7, configHash: "sha256:xyz"}, identityStore)
 
-	mgr.SetSingboxStatus("unhealthy")
 	status := mgr.Status()
-	if status.SingboxStatus != "unhealthy" {
-		t.Fatalf("expected singbox unhealthy, got %s", status.SingboxStatus)
+	if !status.IsDeployed {
+		t.Fatal("expected IsDeployed=true")
+	}
+	if status.Registered {
+		t.Fatal("expected Registered=false")
+	}
+	if status.HeartbeatsSent != 0 {
+		t.Fatal("expected 0 heartbeats")
 	}
 }

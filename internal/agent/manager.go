@@ -13,39 +13,33 @@ const (
 	// DefaultHeartbeatInterval is the default interval between heartbeats.
 	DefaultHeartbeatInterval = 30 * time.Second
 
-	// DefaultRegisterTimeout is how long to wait for the initial registration.
-	DefaultRegisterTimeout = 15 * time.Second
-
-	// status constants.
-	healthHealthy  = "healthy"
-	healthDegraded = "degraded"
-	healthDown     = "down"
-
-	singboxHealthy   = "healthy"
-	singboxUnhealthy = "unhealthy"
-	singboxUnknown   = "unknown"
+	// SingBox status constants matching Backend singbox_status enum.
+	SingboxStatusUnknown  = "unknown"
+	SingboxStatusRunning  = "running"
+	SingboxStatusDegraded = "degraded"
+	SingboxStatusStopped  = "stopped"
 )
 
-// Manager manages the NodeAgent lifecycle: registration, heartbeat, and
-// system metrics collection. TASK-NODE-001.
+// Manager manages the NodeAgent lifecycle: registration, identity persistence,
+// heartbeat with HMAC signature, and system metrics collection.
+// Aligned to Backend commit 02794f0. TASK-NODE-001.
 type Manager struct {
 	client         *Client
 	collector      MetricsCollector
 	configProvider ConfigProvider
+	identityStore  *IdentityStore
 
-	mu               sync.RWMutex
-	registered       bool
-	registerResp     *RegisterResponse
-	registerAt       *time.Time
-	registerErr      string
-	heartbeatsSent   int64
-	lastHeartbeatAt  *time.Time
-	lastHeartbeatOK  bool
+	mu              sync.RWMutex
+	identity        *Identity
+	registered      bool
+	registerAt      *time.Time
+	registerErr     string
+	heartbeatsSent  int64
+	lastHeartbeatAt *time.Time
+	lastHeartbeatOK bool
 	lastHeartbeatErr string
-	lastMetrics      *SystemMetrics
-	healthStatus     string
-	singboxStatus    string
-	healthStatusMu   sync.RWMutex
+	lastMetrics     *SystemMetrics
+	singboxStatus   string
 
 	pollCtx    context.Context
 	pollCancel context.CancelFunc
@@ -55,37 +49,69 @@ type Manager struct {
 }
 
 // NewManager creates a new AgentManager.
-func NewManager(client *Client, collector MetricsCollector, configProvider ConfigProvider) *Manager {
+func NewManager(client *Client, collector MetricsCollector, configProvider ConfigProvider, identityStore *IdentityStore) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &Manager{
+	return &Manager{
 		client:         client,
 		collector:      collector,
 		configProvider: configProvider,
+		identityStore:  identityStore,
 		pollCtx:        ctx,
 		pollCancel:     cancel,
-		healthStatus:   healthHealthy,
-		singboxStatus:  singboxUnknown,
+		singboxStatus:  SingboxStatusUnknown,
 	}
-	return m
 }
 
 // SetSingboxStatus allows the sing-box controller to update the sing-box
 // health status used in heartbeats.
 func (m *Manager) SetSingboxStatus(status string) {
-	m.healthStatusMu.Lock()
-	defer m.healthStatusMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.singboxStatus = status
 }
 
-// Register performs the startup registration. It is meant to be called once
-// during boot. If it fails, the agent logs a warning and enters degraded mode
-// but does NOT exit the process.
-func (m *Manager) Register(ctx context.Context) error {
-	resp, err := m.client.Register(ctx)
+// LoadIdentity attempts to load a previously persisted node identity. If
+// successful, the client is configured with the credentials and Register()
+// can be skipped on subsequent starts. Returns true if identity was loaded.
+func (m *Manager) LoadIdentity() bool {
+	id, err := m.identityStore.Load()
+	if err != nil {
+		log.Printf("[agent] failed to load identity: %v", err)
+		return false
+	}
+	if id == nil || id.NodeID == "" || id.NodeSecret == "" {
+		return false
+	}
+
+	m.mu.Lock()
+	m.identity = id
+	m.registered = true
+	m.mu.Unlock()
+
+	m.client.SetNodeIdentity(id.NodeID, id.NodeSecret)
+	log.Printf("[agent] loaded identity for node %s from %s", id.NodeID, m.identityStore.FilePath())
+	return true
+}
+
+// Register performs the startup registration. On success the returned
+// node_id and node_secret are persisted to disk and set on the client.
+// Registration is REQUIRED only on first start; subsequent starts use
+// LoadIdentity instead. If register fails, the agent continues in
+// degraded mode and does NOT exit.
+func (m *Manager) Register(ctx context.Context, nodeName string) error {
+	// If we already have a local identity, inject it into the request.
+	m.mu.RLock()
+	id := m.identity // may be nil on first start
+	m.mu.RUnlock()
+
+	if id != nil {
+		m.client.SetNodeIdentity(id.NodeID, id.NodeSecret)
+	}
+
+	resp, err := m.client.Register(ctx, nodeName)
 	if err != nil {
 		m.mu.Lock()
 		m.registerErr = err.Error()
-		m.healthStatus = healthDegraded
 		m.mu.Unlock()
 		m.fireStatusHooks()
 		return fmt.Errorf("register failed: %w", err)
@@ -94,19 +120,29 @@ func (m *Manager) Register(ctx context.Context) error {
 	now := time.Now()
 	m.mu.Lock()
 	m.registered = true
-	m.registerResp = resp
 	m.registerAt = &now
 	m.registerErr = ""
-	// Don't mark as degraded just because status is pending_review.
+
+	// If the Backend returned a node_secret (first registration), persist it.
+	if resp.NodeSecret != "" {
+		newID := &Identity{NodeID: resp.NodeID, NodeSecret: resp.NodeSecret}
+		if saveErr := m.identityStore.Save(newID); saveErr != nil {
+			log.Printf("[agent] failed to persist identity: %v", saveErr)
+		}
+		m.identity = newID
+		m.client.SetNodeIdentity(resp.NodeID, resp.NodeSecret)
+		log.Printf("[agent] registered new node %s, secret persisted", resp.NodeID)
+	} else if id != nil {
+		// Re-registration — Backend did not return a new secret, keep existing.
+		log.Printf("[agent] re-registered node %s (status=%s)", resp.NodeID, resp.Status)
+	}
 	m.mu.Unlock()
 
-	log.Printf("[agent] registered node %s with status %q", resp.NodeID, resp.Status)
 	m.fireStatusHooks()
 	return nil
 }
 
-// StartHeartbeatLoop starts the background heartbeat goroutine. Call
-// StopHeartbeatLoop to stop it.
+// StartHeartbeatLoop starts the background heartbeat goroutine.
 func (m *Manager) StartHeartbeatLoop(interval time.Duration) {
 	m.pollWg.Add(1)
 	go func() {
@@ -129,7 +165,7 @@ func (m *Manager) StartHeartbeatLoop(interval time.Duration) {
 	}()
 }
 
-// StopHeartbeatLoop gracefully stops the background heartbeat goroutine.
+// StopHeartbeatLoop stops the background heartbeat goroutine.
 func (m *Manager) StopHeartbeatLoop() {
 	m.pollCancel()
 	m.pollWg.Wait()
@@ -148,43 +184,41 @@ func (m *Manager) sendHeartbeat() error {
 		m.mu.Unlock()
 	}
 
-	// Build heartbeat request.
+	// Build heartbeat request matching Backend HeartbeatRequest fields.
 	m.mu.RLock()
 	cfgVersion := m.configProvider.ConfigVersion()
 	cfgHash := m.configProvider.ConfigHash()
 	isDegraded := m.configProvider.IsDegraded()
 	degradedReason := ""
 	if isDegraded {
-		m.healthStatus = healthDegraded
 		degradedReason = "config subsystem degraded"
 	}
 
-	// Determine health status based on various factors.
-	healthStatus := m.healthStatus
-	if healthStatus == "" {
-		healthStatus = healthHealthy
-	}
-
-	m.mu.RUnlock()
-
-	m.healthStatusMu.RLock()
 	sbStatus := m.singboxStatus
-	m.healthStatusMu.RUnlock()
+	m.mu.RUnlock()
 
 	if metrics == nil {
 		metrics = &SystemMetrics{}
 	}
 
+	// Map SystemMetrics → Backend HeartbeatRequest fields.
+	// load_score is a coarse proxy from load_1.
+	loadScore := int(metrics.Load1 + 0.5)
+	if loadScore > 100 {
+		loadScore = 100
+	}
+
 	hb := &HeartbeatRequest{
-		NodeID:         m.client.nodeID,
-		AgentVersion:   m.client.agentVersion,
-		ConfigVersion:  cfgVersion,
-		ConfigHash:     cfgHash,
-		HealthStatus:   healthStatus,
-		Degraded:       isDegraded,
-		DegradedReason: degradedReason,
-		SingboxStatus:  sbStatus,
-		SystemMetrics:  *metrics,
+		AgentVersion:      m.client.agentVersion,
+		ConfigVersion:     cfgVersion,
+		ConfigHash:        cfgHash,
+		SingboxStatus:     sbStatus,
+		LoadScore:         loadScore,
+		CPUUsage:          metrics.CPUPercent,
+		MemoryUsage:       metrics.MemoryPercent,
+		ActiveConnections: metrics.ActiveConnections,
+		Degraded:          isDegraded,
+		DegradedReason:    degradedReason,
 	}
 
 	ctx, cancel := context.WithTimeout(m.pollCtx, 15*time.Second)
@@ -200,7 +234,6 @@ func (m *Manager) sendHeartbeat() error {
 	if err != nil {
 		m.lastHeartbeatOK = false
 		m.lastHeartbeatErr = err.Error()
-		m.healthStatus = healthDegraded
 		m.mu.Unlock()
 		m.fireStatusHooks()
 		return fmt.Errorf("send heartbeat: %w", err)
@@ -208,23 +241,16 @@ func (m *Manager) sendHeartbeat() error {
 
 	m.lastHeartbeatOK = true
 	m.lastHeartbeatErr = ""
-	// Reset health to healthy only if it was previously down/degraded from
-	// heartbeat failures and now succeeds.
-	if m.healthStatus == healthDegraded && !isDegraded {
-		// Only restore to healthy if the config manager is not degraded.
-		m.healthStatus = healthHealthy
-	}
 	m.mu.Unlock()
 
-	log.Printf("[agent] heartbeat sent (cfg v%d, degraded=%v, sb=%s, accepted=%v)",
-		cfgVersion, isDegraded, sbStatus, hbResp.Accepted)
+	log.Printf("[agent] heartbeat sent (cfg v%d, degraded=%v, sb=%s, ok=%v, server_cfg_v=%d)",
+		cfgVersion, isDegraded, sbStatus, hbResp.OK, hbResp.ServerConfigVersion)
 	m.fireStatusHooks()
 
 	return nil
 }
 
-// Status returns an observable snapshot of agent registration and heartbeat
-// state.
+// Status returns an observable snapshot of agent state.
 func (m *Manager) Status() AgentStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -232,18 +258,19 @@ func (m *Manager) Status() AgentStatus {
 	s := AgentStatus{
 		IsDeployed:       true,
 		Registered:       m.registered,
+		NodeID:           "",
 		NodeStatus:       "",
 		HeartbeatsSent:   m.heartbeatsSent,
 		LastHeartbeatOK:  m.lastHeartbeatOK,
 		LastHeartbeatErr: m.lastHeartbeatErr,
-		HealthStatus:     m.healthStatus,
+		HealthStatus:     "healthy",
 		Degraded:         m.configProvider.IsDegraded(),
-		DegradedReason:   "",
 		SingboxStatus:    m.singboxStatus,
 		LastSystemMetrics: m.lastMetrics,
+		IdentityFile:     m.identityStore.FilePath(),
 	}
-	if m.registerResp != nil {
-		s.NodeStatus = m.registerResp.Status
+	if m.identity != nil {
+		s.NodeID = m.identity.NodeID
 	}
 	if m.registerAt != nil {
 		unix := m.registerAt.Unix()
@@ -255,9 +282,12 @@ func (m *Manager) Status() AgentStatus {
 		s.LastHeartbeatAt = &unix
 	}
 	if m.configProvider.IsDegraded() {
+		s.HealthStatus = "degraded"
 		s.DegradedReason = "config subsystem degraded"
 	}
-
+	if !m.lastHeartbeatOK && m.heartbeatsSent > 0 {
+		s.HealthStatus = "degraded"
+	}
 	return s
 }
 
@@ -279,7 +309,7 @@ func (m *Manager) fireStatusHooks() {
 	}
 }
 
-// ---- shared helpers (also used by config package) ----
+// ---- shared helpers ----
 
 const maxJitterFraction = 0.25
 

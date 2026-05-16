@@ -2,68 +2,85 @@
 // system metrics collection subsystem. TASK-NODE-001.
 package agent
 
-// RegisterRequest is sent to POST /internal/agent/register on startup.
+// RegisterRequest matches Backend 02794f0 internal/node/types.go RegisterRequest.
+// POST /internal/agent/register (no auth).
 type RegisterRequest struct {
-	NodeID       string `json:"node_id"`
-	AgentVersion string `json:"agent_version"`
-	Timestamp    int64  `json:"timestamp"`
+	NodeID       string `json:"node_id,omitempty"`
+	NodeSecret   string `json:"node_secret,omitempty"`
+	NodeName     string `json:"node_name,omitempty"`
+	AgentVersion string `json:"agent_version,omitempty"`
+	IPAddress    string `json:"ip_address,omitempty"`
 }
 
-// RegisterResponse from Backend after registration.
+// RegisterResponse matches Backend 02794f0 internal/node/types.go RegisterResponse.
+// node_secret is only returned on first registration.
 type RegisterResponse struct {
-	NodeID  string `json:"node_id"`
-	Status  string `json:"status"` // pending_review / approved / active / rejected
-	Message string `json:"message,omitempty"`
+	NodeID     string `json:"node_id"`
+	NodeSecret string `json:"node_secret,omitempty"`
+	Status     string `json:"status"` // pending_review / approved / active / rejected
 }
 
-// HeartbeatRequest is sent to POST /internal/agent/heartbeat periodically.
+// HeartbeatRequest matches Backend 02794f0 internal/node/types.go HeartbeatRequest.
+// POST /internal/agent/heartbeat (requires X-Node-ID, X-Timestamp, X-Signature).
+// Body fields only — node_id is extracted from header by middleware.
 type HeartbeatRequest struct {
-	NodeID        string        `json:"node_id"`
-	AgentVersion  string        `json:"agent_version"`
-	ConfigVersion int           `json:"config_version"`
-	ConfigHash    string        `json:"config_hash"`
-	HealthStatus  string        `json:"health_status"`  // healthy / degraded / down
-	Degraded      bool          `json:"degraded"`
-	DegradedReason string       `json:"degraded_reason,omitempty"`
-	SingboxStatus string        `json:"singbox_status"` // healthy / unhealthy / unknown
-	SystemMetrics SystemMetrics `json:"system_metrics"`
-	Timestamp     int64         `json:"timestamp"`
+	AgentVersion      string  `json:"agent_version,omitempty"`
+	ConfigVersion     int     `json:"config_version"`
+	ConfigHash        string  `json:"config_hash,omitempty"`
+	SingboxStatus     string  `json:"singbox_status,omitempty"`
+	LoadScore         int     `json:"load_score"`
+	CPUUsage          float64 `json:"cpu_usage"`
+	MemoryUsage       float64 `json:"memory_usage"`
+	NetworkTxBytes    int64   `json:"network_tx_bytes"`
+	NetworkRxBytes    int64   `json:"network_rx_bytes"`
+	ActiveConnections int     `json:"active_connections"`
+	Degraded          bool    `json:"degraded"`
+	DegradedReason    string  `json:"degraded_reason,omitempty"`
+}
+
+// HeartbeatResponse matches Backend 02794f0 internal/node/types.go HeartbeatResponse.
+type HeartbeatResponse struct {
+	OK                  bool   `json:"ok"`
+	ServerConfigVersion int    `json:"server_config_version"`
+	Degraded            bool   `json:"degraded,omitempty"`
 }
 
 // SystemMetrics holds the self-collected system performance data.
+// Mapped into HeartbeatRequest fields before sending.
 type SystemMetrics struct {
-	CPUPercent        float64 `json:"cpu_percent"`
-	MemoryPercent     float64 `json:"memory_percent"`
-	MemoryUsedMB      int64   `json:"memory_used_mb"`
-	Load1             float64 `json:"load_1"`
-	Load5             float64 `json:"load_5"`
-	Load15            float64 `json:"load_15"`
-	ActiveConnections int     `json:"active_connections"`
+	CPUPercent        float64
+	MemoryPercent     float64
+	MemoryUsedMB      int64
+	Load1             float64
+	Load5             float64
+	Load15            float64
+	ActiveConnections int
 }
 
-// HeartbeatResponse from Backend after a heartbeat POST.
-type HeartbeatResponse struct {
-	Accepted       bool   `json:"accepted"`
-	ServerTime     int64  `json:"server_time,omitempty"`
-	FallbackAction string `json:"fallback_action,omitempty"`
+// Identity is the local persistence format for node registration credentials.
+type Identity struct {
+	NodeID     string `json:"node_id"`
+	NodeSecret string `json:"node_secret"`
 }
 
 // AgentStatus is an observable snapshot of the agent's registration and
 // heartbeat state. Exposed via /agent/status HTTP endpoint.
 type AgentStatus struct {
-	IsDeployed        bool    `json:"is_deployed"`
-	Registered        bool    `json:"registered"`
-	NodeStatus        string  `json:"node_status,omitempty"`
-	LastRegisterAt    *int64  `json:"last_register_at,omitempty"`
-	LastRegisterErr   string  `json:"last_register_error,omitempty"`
-	HeartbeatsSent    int64   `json:"heartbeats_sent"`
-	LastHeartbeatAt   *int64  `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatOK   bool    `json:"last_heartbeat_ok"`
-	LastHeartbeatErr  string  `json:"last_heartbeat_error,omitempty"`
-	HealthStatus      string  `json:"health_status"`
-	Degraded          bool    `json:"degraded"`
-	DegradedReason    string  `json:"degraded_reason,omitempty"`
-	SingboxStatus     string  `json:"singbox_status"`
+	IsDeployed        bool           `json:"is_deployed"`
+	Registered        bool           `json:"registered"`
+	IdentityFile      string         `json:"identity_file,omitempty"`
+	NodeID            string         `json:"node_id,omitempty"`
+	NodeStatus        string         `json:"node_status,omitempty"`
+	LastRegisterAt    *int64         `json:"last_register_at,omitempty"`
+	LastRegisterErr   string         `json:"last_register_error,omitempty"`
+	HeartbeatsSent    int64          `json:"heartbeats_sent"`
+	LastHeartbeatAt   *int64         `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatOK   bool           `json:"last_heartbeat_ok"`
+	LastHeartbeatErr  string         `json:"last_heartbeat_error,omitempty"`
+	HealthStatus      string         `json:"health_status"`
+	Degraded          bool           `json:"degraded"`
+	DegradedReason    string         `json:"degraded_reason,omitempty"`
+	SingboxStatus     string         `json:"singbox_status"`
 	LastSystemMetrics *SystemMetrics `json:"last_system_metrics,omitempty"`
 }
 

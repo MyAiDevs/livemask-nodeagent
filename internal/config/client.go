@@ -46,6 +46,12 @@ func NewClient(baseURL, nodeID, agentVersion string, opts ...ClientOption) *Clie
 	return c
 }
 
+// SetNodeID updates the node ID used in config requests (called after
+// registration obtains the real node_id).
+func (c *Client) SetNodeID(nodeID string) {
+	c.nodeID = nodeID
+}
+
 // Fetch retrieves the latest config from Backend.
 // If localVersion > 0 it is sent as the local last-known-good version.
 func (c *Client) Fetch(ctx context.Context, localVersion int) (*ConfigResponse, error) {
