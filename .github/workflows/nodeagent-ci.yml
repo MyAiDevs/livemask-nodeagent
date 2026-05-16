@@ -5,6 +5,7 @@ on:
   repository_dispatch:
     types:
       - docs-contract-changed
+      - task-unlocked
 
 permissions:
   actions: read
