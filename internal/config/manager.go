@@ -94,6 +94,33 @@ func (m *Manager) CurrentConfig() RuntimeConfig {
 	return DefaultRuntimeConfig()
 }
 
+// ConfigVersion returns the current config version (0 if none loaded).
+func (m *Manager) ConfigVersion() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.currentResp != nil {
+		return m.currentResp.ConfigVersion
+	}
+	return 0
+}
+
+// ConfigHash returns the current config hash (empty if none loaded).
+func (m *Manager) ConfigHash() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.currentResp != nil {
+		return m.currentResp.ConfigHash
+	}
+	return ""
+}
+
+// IsDegraded returns whether the config manager is in degraded mode.
+func (m *Manager) IsDegraded() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.isDegraded
+}
+
 // OnStatusChange registers a callback that fires when the config status
 // changes (after a successful or failed fetch).
 func (m *Manager) OnStatusChange(hook func(ConfigStatus)) {

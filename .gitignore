@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-nodeagent
+/nodeagent
 cmd/nodeagent/nodeagent
 
 # Test binary, built with `go test -c`
