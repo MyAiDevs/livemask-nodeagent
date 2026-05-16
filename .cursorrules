@@ -4,6 +4,7 @@
 @docs/ai-rules/v3.7/00-Core-Principles.md
 @docs/ai-rules/v3.7/04-Multi-Repo-Linkage.md
 @docs/ai-rules/v3.7/13-Multi-Repo-Development.md
+@docs/ai-rules/v3.7/16-Task-Completion-Report.md
 @docs/docs/LiveMask_开发任务清单与里程碑_v3.6.md
 
 ## NodeAgent Specific Rules
@@ -14,6 +15,12 @@
 ## Multi-Window Development
 This window is for **NodeAgent** (VPN node) development.
 Always consider impact on Backend config delivery and App connection stability.
+
+## Task Completion Report
+When a task or subtask is complete, use the standard completion report from:
+@docs/ai-rules/v3.7/16-Task-Completion-Report.md
+
+The report must explicitly say which other repo windows are unlocked for parallel development and which remain blocked.
 
 ## DoD Self-Check
 - [ ] Linked to TASK-XXXX
