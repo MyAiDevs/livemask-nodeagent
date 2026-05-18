@@ -32,9 +32,9 @@ type mockConfigProvider struct {
 	degraded      bool
 }
 
-func (m *mockConfigProvider) ConfigVersion() int   { return m.configVersion }
-func (m *mockConfigProvider) ConfigHash() string    { return m.configHash }
-func (m *mockConfigProvider) IsDegraded() bool      { return m.degraded }
+func (m *mockConfigProvider) ConfigVersion() int { return m.configVersion }
+func (m *mockConfigProvider) ConfigHash() string { return m.configHash }
+func (m *mockConfigProvider) IsDegraded() bool   { return m.degraded }
 
 type mockSingboxProvider struct {
 	status singbox.RuntimeStatus
@@ -329,12 +329,14 @@ func TestManager_SingboxStatusRunning(t *testing.T) {
 
 	sbProvider := &mockSingboxProvider{
 		status: singbox.RuntimeStatus{
-			Enabled: true,
-			Status:  "running",
-			PID:     1234,
-			ConfigPath: "/tmp/singbox.json",
-			ListenHost: "127.0.0.1",
-			ListenPort: 10808,
+			Enabled:            true,
+			Status:             "running",
+			PID:                1234,
+			ConfigPath:         "/tmp/singbox.json",
+			ListenHost:         "127.0.0.1",
+			ListenPort:         10808,
+			EndpointReady:      true,
+			PublicProbeEnabled: false,
 		},
 	}
 
@@ -351,7 +353,45 @@ func TestManager_SingboxStatusRunning(t *testing.T) {
 		t.Fatalf("expected PID 1234, got %d", status.Singbox.PID)
 	}
 	if status.Degraded {
-		t.Fatal("expected not degraded when singbox running")
+		t.Fatal("expected not degraded when singbox running with endpoint_ready=true")
+	}
+}
+
+func TestManager_SingboxRunningEndpointNotReadyDegrades(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	client := NewClient("http://localhost:1", "v1.0")
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled:            true,
+			Status:             "running",
+			PID:                1234,
+			ListenHost:         "127.0.0.1",
+			ListenPort:         10808,
+			PublicEndpointHost: "node.example.com",
+			PublicEndpointPort: 443,
+			EndpointReady:      false,
+			PublicProbeEnabled: true,
+			PublicProbeOK:      false,
+			PublicProbeLastErr: "connection refused",
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, sbProvider)
+
+	status := mgr.Status()
+	if status.SingboxStatus != SingboxStatusRunning {
+		t.Fatalf("expected singbox_status running, got %s", status.SingboxStatus)
+	}
+	if !status.Degraded {
+		t.Fatal("expected degraded when running endpoint is not ready")
+	}
+	if status.DegradedReason != "endpoint_not_ready" {
+		t.Fatalf("expected endpoint_not_ready, got %q", status.DegradedReason)
+	}
+	if status.Singbox == nil || !status.Singbox.PublicProbeEnabled {
+		t.Fatal("expected public probe status in /agent/status payload")
 	}
 }
 

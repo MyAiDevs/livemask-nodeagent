@@ -58,6 +58,15 @@ func (a *RuntimeApplier) Apply(old, new *RuntimeConfig) error {
 			Message: fmt.Sprintf("must be >= 1, got %d", new.Singbox.HealthCheckTimeoutSeconds),
 		}
 	}
+	if new.Singbox.Transport != "" &&
+		new.Singbox.Transport != "mixed" &&
+		new.Singbox.Transport != "socks" &&
+		new.Singbox.Transport != "tun" {
+		return &ApplyError{
+			Field:   "singbox.transport",
+			Message: "must be mixed, socks, or tun",
+		}
+	}
 	if new.Singbox.ListenPort != 0 {
 		if new.Singbox.ListenPort < 1 || new.Singbox.ListenPort > 65535 {
 			return &ApplyError{
@@ -72,6 +81,23 @@ func (a *RuntimeApplier) Apply(old, new *RuntimeConfig) error {
 				Field:   "singbox.public_endpoint_port",
 				Message: fmt.Sprintf("must be 1-65535, got %d", new.Singbox.PublicEndpointPort),
 			}
+		}
+	}
+	if new.Singbox.PublicProbePort != 0 {
+		if new.Singbox.PublicProbePort < 1 || new.Singbox.PublicProbePort > 65535 {
+			return &ApplyError{
+				Field:   "singbox.public_probe_port",
+				Message: fmt.Sprintf("must be 1-65535, got %d", new.Singbox.PublicProbePort),
+			}
+		}
+	}
+	if new.Singbox.HealthCheckMode != "" &&
+		new.Singbox.HealthCheckMode != "local" &&
+		new.Singbox.HealthCheckMode != "public" &&
+		new.Singbox.HealthCheckMode != "both" {
+		return &ApplyError{
+			Field:   "singbox.health_check_mode",
+			Message: "must be local, public, or both",
 		}
 	}
 	if new.Singbox.TunMTU != 0 && new.Singbox.TunMTU < 128 {

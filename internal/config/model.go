@@ -22,22 +22,22 @@ type ConfigResponse struct {
 // RuntimeConfig is the parsed payload for nodeagent.runtime_config.
 // See docs/contracts/config/core-configs.md#nodeagentruntime_config.
 type RuntimeConfig struct {
-	SchemaVersion string           `json:"schema_version"`
-	Reporting     ReportingConfig  `json:"reporting"`
-	DegradedMode  DegradedConfig   `json:"degraded_mode"`
-	Singbox       SingboxConfig    `json:"singbox"`
+	SchemaVersion string          `json:"schema_version"`
+	Reporting     ReportingConfig `json:"reporting"`
+	DegradedMode  DegradedConfig  `json:"degraded_mode"`
+	Singbox       SingboxConfig   `json:"singbox"`
 }
 
 // ReportingConfig holds intervals and buffering limits.
 type ReportingConfig struct {
-	HeartbeatIntervalSeconds  int `json:"heartbeat_interval_seconds"`
+	HeartbeatIntervalSeconds   int `json:"heartbeat_interval_seconds"`
 	BatchUploadIntervalSeconds int `json:"batch_upload_interval_seconds"`
-	MaxOfflineBufferItems     int `json:"max_offline_buffer_items"`
+	MaxOfflineBufferItems      int `json:"max_offline_buffer_items"`
 }
 
 // DegradedConfig controls degraded mode behaviour.
 type DegradedConfig struct {
-	Enabled    bool `json:"enabled"`
+	Enabled     bool `json:"enabled"`
 	AutoRecover bool `json:"auto_recover"`
 }
 
@@ -59,6 +59,15 @@ type SingboxConfig struct {
 	RouteGlobal               bool   `json:"route_global"`
 	BypassLAN                 bool   `json:"bypass_lan"`
 	ProxyOutboundTag          string `json:"proxy_outbound_tag,omitempty"`
+	// TASK-NODEAGENT-SINGBOX-003.
+	TLSEnabled           bool   `json:"tls_enabled"`
+	SNI                  string `json:"sni,omitempty"`
+	ALPN                 string `json:"alpn,omitempty"`
+	PublicProbeEnabled   bool   `json:"public_probe_enabled"`
+	PublicProbeHost      string `json:"public_probe_host,omitempty"`
+	PublicProbePort      int    `json:"public_probe_port,omitempty"`
+	PublicProbeTimeoutMs int    `json:"public_probe_timeout_ms,omitempty"`
+	HealthCheckMode      string `json:"health_check_mode,omitempty"`
 }
 
 // DefaultRuntimeConfig returns a safe default configuration.
@@ -66,9 +75,9 @@ func DefaultRuntimeConfig() RuntimeConfig {
 	return RuntimeConfig{
 		SchemaVersion: "1.0",
 		Reporting: ReportingConfig{
-			HeartbeatIntervalSeconds:  60,
+			HeartbeatIntervalSeconds:   60,
 			BatchUploadIntervalSeconds: 300,
-			MaxOfflineBufferItems:     10000,
+			MaxOfflineBufferItems:      10000,
 		},
 		DegradedMode: DegradedConfig{
 			Enabled:     true,
@@ -86,6 +95,7 @@ func DefaultRuntimeConfig() RuntimeConfig {
 			DNSServers:                "1.1.1.1,8.8.8.8",
 			RouteGlobal:               false,
 			BypassLAN:                 true,
+			HealthCheckMode:           "local",
 		},
 	}
 }
@@ -97,18 +107,18 @@ func (c *RuntimeConfig) Clone() RuntimeConfig {
 
 // CacheEntry is the on-disk format for the last-known-good config.
 type CacheEntry struct {
-	Response   *ConfigResponse `json:"response,omitempty"`
-	Parsed     *RuntimeConfig  `json:"parsed,omitempty"`
-	FetchedAt  time.Time       `json:"fetched_at"`
+	Response  *ConfigResponse `json:"response,omitempty"`
+	Parsed    *RuntimeConfig  `json:"parsed,omitempty"`
+	FetchedAt time.Time       `json:"fetched_at"`
 }
 
 // ConfigStatus is an observable snapshot of the current config state.
 type ConfigStatus struct {
-	ConfigVersion int       `json:"config_version"`
-	ConfigHash    string    `json:"config_hash"`
-	ConfigKey     string    `json:"config_key"`
-	SchemaVersion string    `json:"schema_version"`
-	IsDegraded    bool      `json:"is_degraded"`
+	ConfigVersion int        `json:"config_version"`
+	ConfigHash    string     `json:"config_hash"`
+	ConfigKey     string     `json:"config_key"`
+	SchemaVersion string     `json:"schema_version"`
+	IsDegraded    bool       `json:"is_degraded"`
 	LastFetchAt   *time.Time `json:"last_fetch_at,omitempty"`
-	LastError     string    `json:"last_error,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
 }

@@ -13,16 +13,21 @@ func TestRender_ProductionSchema(t *testing.T) {
 	cfgPath := filepath.Join(dir, "singbox.json")
 
 	cfg := &SingboxConfig{
-		ConfigPath:  cfgPath,
-		ListenHost:  "127.0.0.1",
-		ListenPort:  10808,
-		LogLevel:    "info",
-		Transport:   "mixed",
-		DNSEnabled:  true,
-		DNSStrategy: "prefer_ipv4",
-		DNSServers:  []string{"1.1.1.1", "8.8.8.8"},
-		RouteGlobal: false,
-		BypassLAN:   true,
+		ConfigPath:         cfgPath,
+		ListenHost:         "127.0.0.1",
+		ListenPort:         10808,
+		LogLevel:           "info",
+		Transport:          "mixed",
+		DNSEnabled:         true,
+		DNSStrategy:        "prefer_ipv4",
+		DNSServers:         []string{"1.1.1.1", "8.8.8.8"},
+		RouteGlobal:        false,
+		BypassLAN:          true,
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 443,
+		TLSEnabled:         true,
+		SNI:                "node.example.com",
+		ALPN:               "h2,http/1.1",
 	}
 
 	if err := Render(cfg); err != nil {
@@ -45,17 +50,29 @@ func TestRender_ProductionSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("inbounds not found or not an array")
 	}
-	if len(inbounds) < 2 {
-		t.Fatalf("expected at least 2 inbounds, got %d", len(inbounds))
+	if len(inbounds) != 1 {
+		t.Fatalf("expected 1 service inbound, got %d", len(inbounds))
 	}
 
-	// Verify first inbound is "mixed"
-	mixedInbound := inbounds[1].(map[string]any)
+	mixedInbound := inbounds[0].(map[string]any)
 	if mixedInbound["type"] != "mixed" {
 		t.Fatalf("expected mixed inbound type, got %s", mixedInbound["type"])
 	}
+	if mixedInbound["listen"] != "127.0.0.1" {
+		t.Fatalf("expected listen host to stay local, got %s", mixedInbound["listen"])
+	}
 	if mixedInbound["listen_port"] != float64(10808) {
 		t.Fatalf("expected listen_port 10808, got %v", mixedInbound["listen_port"])
+	}
+	if mixedInbound["listen"] == "node.example.com" || mixedInbound["listen_port"] == float64(443) {
+		t.Fatal("public endpoint must not be used as sing-box listen bind")
+	}
+	tlsConfig, ok := mixedInbound["tls"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tls metadata")
+	}
+	if tlsConfig["server_name"] != "node.example.com" {
+		t.Fatalf("expected tls server_name node.example.com, got %s", tlsConfig["server_name"])
 	}
 
 	// Verify outbounds.
@@ -152,6 +169,36 @@ func TestRender_TunTransport(t *testing.T) {
 	}
 }
 
+func TestRender_SocksTransport(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singbox.json")
+
+	cfg := &SingboxConfig{
+		ConfigPath: cfgPath,
+		ListenHost: "127.0.0.1",
+		ListenPort: 10808,
+		Transport:  "socks",
+	}
+
+	if err := Render(cfg); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	data, _ := os.ReadFile(cfgPath)
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	inbounds := parsed["inbounds"].([]any)
+	if len(inbounds) != 1 {
+		t.Fatalf("expected one socks inbound, got %d", len(inbounds))
+	}
+	inbound := inbounds[0].(map[string]any)
+	if inbound["type"] != "socks" {
+		t.Fatalf("expected socks inbound, got %s", inbound["type"])
+	}
+}
+
 func TestRender_RouteGlobal(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "singbox.json")
@@ -210,6 +257,18 @@ func TestRender_NoSecrets(t *testing.T) {
 	}
 }
 
+func TestPublicProbeErrorSanitized(t *testing.T) {
+	errText := sanitizeError("dial tcp token=abc123 password=secret private_key=value node_secret=hidden: connect failed")
+	for _, secret := range []string{"token=abc123", "password=secret", "private_key=value", "node_secret=hidden"} {
+		if strings.Contains(errText, secret) {
+			t.Fatalf("expected sanitized error, got %s", errText)
+		}
+	}
+	if strings.Count(errText, "[redacted]") != 4 {
+		t.Fatalf("expected redactions, got %s", errText)
+	}
+}
+
 func TestRender_InvalidPublicEndpointPort(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "singbox.json")
@@ -225,6 +284,24 @@ func TestRender_InvalidPublicEndpointPort(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "public endpoint port") {
 		t.Fatalf("expected error about public endpoint port, got: %v", err)
+	}
+}
+
+func TestRender_InvalidTransport(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singbox.json")
+
+	cfg := &SingboxConfig{
+		ConfigPath: cfgPath,
+		ListenPort: 10808,
+		Transport:  "hysteria2",
+	}
+	err := Render(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid transport")
+	}
+	if !strings.Contains(err.Error(), "transport") {
+		t.Fatalf("expected error about transport, got: %v", err)
 	}
 }
 

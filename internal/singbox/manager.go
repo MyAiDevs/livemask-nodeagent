@@ -49,6 +49,7 @@ func NewManager(cfg *SingboxConfig) *Manager {
 			PublicEndpointHost: cfg.PublicEndpointHost,
 			PublicEndpointPort: cfg.PublicEndpointPort,
 			EndpointReady:      false,
+			PublicProbeEnabled: EffectivePublicProbeEnabled(cfg),
 		},
 	}
 }
@@ -248,6 +249,15 @@ func (m *Manager) ApplyConfig(ctx context.Context, singCfg *SingboxConfig, confi
 		m.cfg.RouteGlobal = singCfg.RouteGlobal
 		m.cfg.BypassLAN = singCfg.BypassLAN
 		m.cfg.ProxyOutboundTag = singCfg.ProxyOutboundTag
+		// TASK-NODEAGENT-SINGBOX-003: new fields.
+		m.cfg.TLSEnabled = singCfg.TLSEnabled
+		m.cfg.SNI = singCfg.SNI
+		m.cfg.ALPN = singCfg.ALPN
+		m.cfg.PublicProbeEnabled = singCfg.PublicProbeEnabled
+		m.cfg.PublicProbeHost = singCfg.PublicProbeHost
+		m.cfg.PublicProbePort = singCfg.PublicProbePort
+		m.cfg.PublicProbeTimeoutMs = singCfg.PublicProbeTimeoutMs
+		m.cfg.HealthCheckMode = singCfg.HealthCheckMode
 
 		// Update runtime status with new fields.
 		m.statusMu.Lock()
@@ -255,6 +265,7 @@ func (m *Manager) ApplyConfig(ctx context.Context, singCfg *SingboxConfig, confi
 		m.status.ProtocolProfile = singCfg.ProtocolProfile
 		m.status.PublicEndpointHost = singCfg.PublicEndpointHost
 		m.status.PublicEndpointPort = singCfg.PublicEndpointPort
+		m.status.PublicProbeEnabled = EffectivePublicProbeEnabled(singCfg)
 		m.statusMu.Unlock()
 	}
 
@@ -265,6 +276,7 @@ func (m *Manager) ApplyConfig(ctx context.Context, singCfg *SingboxConfig, confi
 }
 
 // HealthCheck performs a single health check and updates the status.
+// TASK-NODEAGENT-SINGBOX-003: integrates public probe checks.
 func (m *Manager) HealthCheck() {
 	m.statusMu.Lock()
 	status := &m.status
@@ -276,6 +288,8 @@ func (m *Manager) HealthCheck() {
 		status.PID = 0
 		status.LastError = ""
 		status.EndpointReady = false
+		status.PublicProbeOK = false
+		status.PublicProbeLastErr = ""
 		m.statusMu.Unlock()
 		return
 	}
@@ -289,6 +303,8 @@ func (m *Manager) HealthCheck() {
 		status.Status = string(StatusStopped)
 		status.LastError = ""
 		status.EndpointReady = false
+		status.PublicProbeOK = false
+		status.PublicProbeLastErr = ""
 		m.statusMu.Unlock()
 		return
 	}
@@ -298,6 +314,8 @@ func (m *Manager) HealthCheck() {
 		status.Status = string(StatusFailed)
 		status.PID = 0
 		status.EndpointReady = false
+		status.PublicProbeOK = false
+		status.PublicProbeLastErr = ""
 		if status.LastError == "" {
 			status.LastError = "process not running"
 		}
@@ -305,38 +323,51 @@ func (m *Manager) HealthCheck() {
 		return
 	}
 
-	// Process alive — check listen port.
+	// Process alive - check listen port.
 	portOK := m.checkPort(m.cfg.ListenHost, m.cfg.ListenPort)
 
-	// Check endpoint readiness.
-	endpointReady, epReason := IsEndpointReady(m.cfg)
-	if !endpointReady {
-		m.statusMu.Lock()
-		if portOK {
-			status.Status = string(StatusRunning)
-			status.LastError = epReason
-		} else {
-			status.Status = string(StatusUnhealthy)
-			status.LastError = "process running but port unreachable"
-		}
-		status.EndpointReady = false
-		m.statusMu.Unlock()
-		return
-	}
+	// Check endpoint field readiness.
+	endpointReady, _ := IsEndpointReady(m.cfg)
 
-	if portOK {
-		m.statusMu.Lock()
-		status.Status = string(StatusRunning)
-		status.LastError = ""
-		status.EndpointReady = true
-		m.statusMu.Unlock()
-		return
-	}
+	// Public probe check.
+	publicProbeEnabled := EffectivePublicProbeEnabled(m.cfg)
+	probeOK, probeReason := PublicProbeHealthCheck(m.cfg)
 
 	m.statusMu.Lock()
-	status.Status = string(StatusUnhealthy)
-	status.EndpointReady = false
-	status.LastError = "process running but port unreachable"
+	status.PublicProbeEnabled = publicProbeEnabled
+	status.PublicProbeOK = probeOK
+	status.PublicProbeLastAt = &now
+	if !probeOK && publicProbeEnabled {
+		status.PublicProbeLastErr = probeReason
+	} else {
+		status.PublicProbeLastErr = ""
+	}
+
+	// endpoint_ready always requires a valid local listener and endpoint fields.
+	// When a public probe is configured, it must also pass.
+	epFieldOK := endpointReady
+	if !epFieldOK || !portOK {
+		status.EndpointReady = false
+	} else if publicProbeEnabled {
+		status.EndpointReady = probeOK
+	} else {
+		status.EndpointReady = true
+	}
+
+	// Compute singbox status.
+	if portOK {
+		status.Status = string(StatusRunning)
+		status.LastError = ""
+	} else {
+		status.Status = string(StatusUnhealthy)
+		status.LastError = "process running but port unreachable"
+	}
+
+	// Override status with endpoint_ready info.
+	if !status.EndpointReady && status.Status == string(StatusRunning) {
+		status.LastError = "endpoint_not_ready"
+		// Status remains "running" while public endpoint readiness is degraded.
+	}
 	m.statusMu.Unlock()
 }
 
@@ -387,6 +418,7 @@ func (m *Manager) isProcessAlive(pid int) bool {
 }
 
 func (m *Manager) checkPort(host string, port int) bool {
+	host = healthDialHost(host)
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
@@ -394,4 +426,11 @@ func (m *Manager) checkPort(host string, port int) bool {
 	}
 	conn.Close()
 	return true
+}
+
+func healthDialHost(host string) string {
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		return "127.0.0.1"
+	}
+	return host
 }

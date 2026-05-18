@@ -6,15 +6,17 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // singboxConfigFile is the JSON structure for the sing-box config file.
 type singboxConfigFile struct {
-	Log       *logConfig        `json:"log,omitempty"`
-	Inbounds  []inboundConfig   `json:"inbounds"`
-	Outbounds []outboundConfig  `json:"outbounds"`
-	Route     *routeConfig      `json:"route,omitempty"`
-	DNS       *dnsConfig        `json:"dns,omitempty"`
+	Log       *logConfig       `json:"log,omitempty"`
+	Inbounds  []inboundConfig  `json:"inbounds"`
+	Outbounds []outboundConfig `json:"outbounds"`
+	Route     *routeConfig     `json:"route,omitempty"`
+	DNS       *dnsConfig       `json:"dns,omitempty"`
 }
 
 type logConfig struct {
@@ -29,6 +31,14 @@ type inboundConfig struct {
 	// Tun-specific
 	InterfaceName string `json:"interface_name,omitempty"`
 	MTU           int    `json:"mtu,omitempty"`
+	// TLS metadata (TASK-NODEAGENT-SINGBOX-003)
+	TLS *inboundTLSConfig `json:"tls,omitempty"`
+}
+
+type inboundTLSConfig struct {
+	Enabled    bool     `json:"enabled,omitempty"`
+	ServerName string   `json:"server_name,omitempty"`
+	ALPN       []string `json:"alpn,omitempty"`
 }
 
 type outboundConfig struct {
@@ -40,9 +50,9 @@ type outboundConfig struct {
 }
 
 type routeConfig struct {
-	Rules    []ruleConfig `json:"rules,omitempty"`
-	Final    string       `json:"final"`
-	AutoDetect bool       `json:"auto_detect_interface,omitempty"`
+	Rules      []ruleConfig `json:"rules,omitempty"`
+	Final      string       `json:"final"`
+	AutoDetect bool         `json:"auto_detect_interface,omitempty"`
 }
 
 type ruleConfig struct {
@@ -55,11 +65,11 @@ type ruleConfig struct {
 }
 
 type dnsConfig struct {
-	Enabled  bool          `json:"enabled,omitempty"`
-	Strategy string        `json:"strategy,omitempty"`
+	Enabled  bool              `json:"enabled,omitempty"`
+	Strategy string            `json:"strategy,omitempty"`
 	Servers  []dnsServerConfig `json:"servers,omitempty"`
-	Final    string        `json:"final,omitempty"`
-	Rules    []dnsRuleConfig  `json:"rules,omitempty"`
+	Final    string            `json:"final,omitempty"`
+	Rules    []dnsRuleConfig   `json:"rules,omitempty"`
 }
 
 type dnsServerConfig struct {
@@ -85,6 +95,12 @@ func Render(cfg *SingboxConfig) error {
 	if cfg.PublicEndpointPort != 0 && (cfg.PublicEndpointPort <= 0 || cfg.PublicEndpointPort > 65535) {
 		return fmt.Errorf("singbox public endpoint port %d is invalid (must be 1-65535)", cfg.PublicEndpointPort)
 	}
+	if cfg.PublicProbePort != 0 && (cfg.PublicProbePort <= 0 || cfg.PublicProbePort > 65535) {
+		return fmt.Errorf("singbox public probe port %d is invalid (must be 1-65535)", cfg.PublicProbePort)
+	}
+	if cfg.Transport != "" && cfg.Transport != "mixed" && cfg.Transport != "socks" && cfg.Transport != "tun" {
+		return fmt.Errorf("singbox transport %q is invalid (must be mixed, socks, or tun)", cfg.Transport)
+	}
 	host := cfg.ListenHost
 	if host == "" {
 		host = "127.0.0.1"
@@ -94,17 +110,12 @@ func Render(cfg *SingboxConfig) error {
 		logLevel = "info"
 	}
 
-	transport := cfg.Transport
-	if transport == "" {
-		transport = "mixed"
-	}
-
 	sf := singboxConfigFile{
-		Log: &logConfig{Level: logLevel},
-		Inbounds: buildInbounds(cfg, host),
+		Log:       &logConfig{Level: logLevel},
+		Inbounds:  buildInbounds(cfg, host),
 		Outbounds: buildOutbounds(cfg),
-		Route: buildRoute(cfg),
-		DNS: buildDNS(cfg),
+		Route:     buildRoute(cfg),
+		DNS:       buildDNS(cfg),
 	}
 
 	data, err := json.MarshalIndent(sf, "", "  ")
@@ -126,7 +137,12 @@ func Render(cfg *SingboxConfig) error {
 func buildInbounds(cfg *SingboxConfig, host string) []inboundConfig {
 	var inbounds []inboundConfig
 
-	if cfg.Transport == "tun" {
+	transport := cfg.Transport
+	if transport == "" {
+		transport = "mixed"
+	}
+
+	if transport == "tun" {
 		iface := cfg.TunInterfaceName
 		if iface == "" {
 			iface = "singbox-tun0"
@@ -143,21 +159,43 @@ func buildInbounds(cfg *SingboxConfig, host string) []inboundConfig {
 		})
 	}
 
-	// Always add socks and mixed on the local listen port for health checking.
-	inbounds = append(inbounds, inboundConfig{
-		Type:       "socks",
-		Tag:        "socks-in",
-		Listen:     host,
-		ListenPort: cfg.ListenPort,
-	})
-	inbounds = append(inbounds, inboundConfig{
-		Type:       "mixed",
-		Tag:        "mixed-in",
-		Listen:     host,
-		ListenPort: cfg.ListenPort,
-	})
+	if transport == "socks" || transport == "mixed" || transport == "tun" {
+		inboundType := transport
+		if transport == "tun" {
+			inboundType = "mixed"
+		}
+		serviceInbound := inboundConfig{
+			Type:       inboundType,
+			Tag:        "service-in",
+			Listen:     host,
+			ListenPort: cfg.ListenPort,
+		}
+		if cfg.TLSEnabled {
+			serviceInbound.TLS = &inboundTLSConfig{
+				Enabled:    true,
+				ServerName: cfg.SNI,
+				ALPN:       parseALPN(cfg.ALPN),
+			}
+		}
+		inbounds = append(inbounds, serviceInbound)
+	}
 
 	return inbounds
+}
+
+// parseALPN splits a comma-separated ALPN string (e.g. "h2,http/1.1") into a slice.
+func parseALPN(alpn string) []string {
+	if alpn == "" {
+		return nil
+	}
+	var parts []string
+	for _, p := range strings.Split(alpn, ",") {
+		s := strings.TrimSpace(p)
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return parts
 }
 
 func buildOutbounds(cfg *SingboxConfig) []outboundConfig {
@@ -241,7 +279,8 @@ func buildDNS(cfg *SingboxConfig) *dnsConfig {
 }
 
 // IsEndpointReady checks whether the public endpoint fields are valid and
-// the listen port is reachable.  This is used by HealthCheck.
+// (optionally) the public host:port is reachable.  This is used by HealthCheck.
+// TASK-NODEAGENT-SINGBOX-003: considers health_check_mode.
 func IsEndpointReady(cfg *SingboxConfig) (bool, string) {
 	if cfg == nil || !cfg.Enabled {
 		return false, "singbox not enabled"
@@ -256,12 +295,83 @@ func IsEndpointReady(cfg *SingboxConfig) (bool, string) {
 		if cfg.PublicEndpointHost == "" {
 			return false, "public endpoint host is empty but port is set"
 		}
-		// Validate host is a parseable IP or hostname.
-		if net.ParseIP(cfg.PublicEndpointHost) == nil {
-			// Not a pure IP; that's fine if it's a hostname
-		}
+	}
+	if cfg.PublicProbePort != 0 && (cfg.PublicProbePort <= 0 || cfg.PublicProbePort > 65535) {
+		return false, "public probe port invalid"
 	}
 	return true, ""
+}
+
+// PublicProbeHealthCheck performs a TCP dial to the configured public probe target.
+// Returns ok=true, "" if the dial succeeds.
+// If public probe is disabled, returns true with no error.
+// TASK-NODEAGENT-SINGBOX-003.
+func PublicProbeHealthCheck(cfg *SingboxConfig) (ok bool, reason string) {
+	if cfg == nil || !cfg.Enabled {
+		return false, "singbox not enabled"
+	}
+	if !EffectivePublicProbeEnabled(cfg) {
+		return true, ""
+	}
+	host := cfg.PublicProbeHost
+	if host == "" {
+		host = cfg.PublicEndpointHost
+	}
+	port := cfg.PublicProbePort
+	if port <= 0 {
+		port = cfg.PublicEndpointPort
+	}
+	if host == "" || port <= 0 {
+		return false, "public probe target not configured (no host/port)"
+	}
+
+	timeoutMs := cfg.PublicProbeTimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = 5000
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	conn, err := net.DialTimeout("tcp", addr, time.Duration(timeoutMs)*time.Millisecond)
+	if err != nil {
+		return false, sanitizeError(fmt.Sprintf("public probe dial failed: %v", err))
+	}
+	conn.Close()
+	return true, ""
+}
+
+func EffectivePublicProbeEnabled(cfg *SingboxConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.PublicProbeEnabled ||
+		cfg.HealthCheckMode == string(HealthCheckPublic) ||
+		cfg.HealthCheckMode == string(HealthCheckBoth)
+}
+
+func sanitizeError(message string) string {
+	if message == "" {
+		return ""
+	}
+	sanitized := message
+	lower := strings.ToLower(sanitized)
+	for _, marker := range []string{"node_secret", "password", "private_key", "access_key", "token"} {
+		for {
+			idx := strings.Index(lower, marker)
+			if idx == -1 {
+				break
+			}
+			end := idx + len(marker)
+			for end < len(sanitized) {
+				ch := sanitized[end]
+				if ch == ' ' || ch == ',' || ch == ';' || ch == ')' || ch == ']' {
+					break
+				}
+				end++
+			}
+			sanitized = sanitized[:idx] + "[redacted]" + sanitized[end:]
+			lower = strings.ToLower(sanitized)
+		}
+	}
+	return sanitized
 }
 
 func privateCIDRs() []string {

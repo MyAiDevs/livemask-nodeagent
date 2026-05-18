@@ -119,6 +119,16 @@ func main() {
 			old.Singbox.RouteGlobal, new.Singbox.RouteGlobal)
 		log.Printf("[config]   singbox.bypass_lan:         %t -> %t",
 			old.Singbox.BypassLAN, new.Singbox.BypassLAN)
+		log.Printf("[config]   singbox.tls_enabled:        %t -> %t",
+			old.Singbox.TLSEnabled, new.Singbox.TLSEnabled)
+		log.Printf("[config]   singbox.sni:                %s -> %s",
+			old.Singbox.SNI, new.Singbox.SNI)
+		log.Printf("[config]   singbox.alpn:               %s -> %s",
+			old.Singbox.ALPN, new.Singbox.ALPN)
+		log.Printf("[config]   singbox.public_probe_enabled: %t -> %t",
+			old.Singbox.PublicProbeEnabled, new.Singbox.PublicProbeEnabled)
+		log.Printf("[config]   singbox.health_check_mode:  %s -> %s",
+			old.Singbox.HealthCheckMode, new.Singbox.HealthCheckMode)
 		log.Printf("[config] **** Config applied successfully ****")
 
 		// Propagate config center values into sing-box runtime config.
@@ -136,6 +146,14 @@ func main() {
 		singboxCfg.RouteGlobal = new.Singbox.RouteGlobal
 		singboxCfg.BypassLAN = new.Singbox.BypassLAN
 		singboxCfg.ProxyOutboundTag = new.Singbox.ProxyOutboundTag
+		singboxCfg.TLSEnabled = new.Singbox.TLSEnabled
+		singboxCfg.SNI = new.Singbox.SNI
+		singboxCfg.ALPN = new.Singbox.ALPN
+		singboxCfg.PublicProbeEnabled = new.Singbox.PublicProbeEnabled
+		singboxCfg.PublicProbeHost = new.Singbox.PublicProbeHost
+		singboxCfg.PublicProbePort = new.Singbox.PublicProbePort
+		singboxCfg.PublicProbeTimeoutMs = new.Singbox.PublicProbeTimeoutMs
+		singboxCfg.HealthCheckMode = new.Singbox.HealthCheckMode
 
 		// Parse comma-separated DNS servers.
 		if new.Singbox.DNSServers != "" {

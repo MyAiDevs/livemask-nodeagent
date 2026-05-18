@@ -14,14 +14,14 @@ const (
 	DefaultHeartbeatInterval = 30 * time.Second
 
 	// SingBox status constants matching Backend singbox_status enum.
-	SingboxStatusUnknown  = "unknown"
-	SingboxStatusRunning  = "running"
-	SingboxStatusDegraded = "degraded"
-	SingboxStatusStopped  = "stopped"
-	SingboxStatusDisabled = "disabled"
-	SingboxStatusFailed   = "failed"
+	SingboxStatusUnknown   = "unknown"
+	SingboxStatusRunning   = "running"
+	SingboxStatusDegraded  = "degraded"
+	SingboxStatusStopped   = "stopped"
+	SingboxStatusDisabled  = "disabled"
+	SingboxStatusFailed    = "failed"
 	SingboxStatusUnhealthy = "unhealthy"
-	SingboxStatusStarting = "starting"
+	SingboxStatusStarting  = "starting"
 )
 
 // Manager manages the NodeAgent lifecycle: registration, identity persistence,
@@ -208,6 +208,10 @@ func (m *Manager) getSingboxRuntimeStatus() *SingboxRuntimeStatus {
 		PublicEndpointHost: s.PublicEndpointHost,
 		PublicEndpointPort: s.PublicEndpointPort,
 		EndpointReady:      s.EndpointReady,
+		PublicProbeEnabled: s.PublicProbeEnabled,
+		PublicProbeOK:      s.PublicProbeOK,
+		PublicProbeLastErr: s.PublicProbeLastErr,
+		PublicProbeLastAt:  s.PublicProbeLastAt,
 		LastStartedAt:      s.LastStartedAt,
 		LastStoppedAt:      s.LastStoppedAt,
 		LastHealthCheckAt:  s.LastHealthCheckAt,
@@ -242,6 +246,10 @@ func (m *Manager) sendHeartbeat() error {
 
 	sbStatus := m.getSingboxStatus()
 
+	// Get runtime status for endpoint_ready check.
+	sbRt := m.getSingboxRuntimeStatus()
+	endpointNotReady := sbRt != nil && sbRt.Status == "running" && !sbRt.EndpointReady
+
 	// Determine degraded state: combine config degraded + sing-box unhealthy/failed.
 	if sbStatus == SingboxStatusFailed || sbStatus == SingboxStatusUnhealthy {
 		isDegraded = true
@@ -249,6 +257,14 @@ func (m *Manager) sendHeartbeat() error {
 			degradedReason = fmt.Sprintf("singbox_%s", sbStatus)
 		} else {
 			degradedReason = degradedReason + fmt.Sprintf("; singbox_%s", sbStatus)
+		}
+	}
+	if endpointNotReady {
+		isDegraded = true
+		if degradedReason == "" {
+			degradedReason = "endpoint_not_ready"
+		} else {
+			degradedReason = degradedReason + "; endpoint_not_ready"
 		}
 	}
 
@@ -309,21 +325,21 @@ func (m *Manager) Status() AgentStatus {
 	defer m.mu.RUnlock()
 
 	s := AgentStatus{
-		IsDeployed:       true,
-		Registered:       m.registered,
-		NodeID:           "",
-		NodeStatus:       "",
-		HeartbeatsSent:   m.heartbeatsSent,
-		LastHeartbeatOK:  m.lastHeartbeatOK,
-		LastHeartbeatErr: m.lastHeartbeatErr,
-		HealthStatus:     "healthy",
-		Degraded:         m.configProvider.IsDegraded(),
-		SingboxStatus:    m.getSingboxStatus(),
-		Singbox:          m.getSingboxRuntimeStatus(),
+		IsDeployed:            true,
+		Registered:            m.registered,
+		NodeID:                "",
+		NodeStatus:            "",
+		HeartbeatsSent:        m.heartbeatsSent,
+		LastHeartbeatOK:       m.lastHeartbeatOK,
+		LastHeartbeatErr:      m.lastHeartbeatErr,
+		HealthStatus:          "healthy",
+		Degraded:              m.configProvider.IsDegraded(),
+		SingboxStatus:         m.getSingboxStatus(),
+		Singbox:               m.getSingboxRuntimeStatus(),
 		LastEndpointReportOK:  m.endpointReportOK,
 		LastEndpointReportErr: m.endpointReportErr,
-		LastSystemMetrics: m.lastMetrics,
-		IdentityFile:     m.identityStore.FilePath(),
+		LastSystemMetrics:     m.lastMetrics,
+		IdentityFile:          m.identityStore.FilePath(),
 	}
 	if m.identity != nil {
 		s.NodeID = m.identity.NodeID
@@ -352,6 +368,12 @@ func (m *Manager) Status() AgentStatus {
 			reasons += "; "
 		}
 		reasons += fmt.Sprintf("singbox_%s", s.SingboxStatus)
+	}
+	if s.Singbox != nil && s.Singbox.Status == "running" && !s.Singbox.EndpointReady {
+		if reasons != "" {
+			reasons += "; "
+		}
+		reasons += "endpoint_not_ready"
 	}
 	if reasons != "" {
 		s.HealthStatus = "degraded"

@@ -2,12 +2,25 @@ package singbox
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func localTCPListener(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = ln.Close()
+	})
+	return ln
+}
 
 // fakeSingboxScript creates a shell script that simulates sing-box run behavior.
 // It writes a marker file and sleeps until killed.
@@ -525,6 +538,134 @@ func TestManager_HealthCheckPublicEndpointValid(t *testing.T) {
 	}
 	if s.EndpointReady {
 		t.Fatal("expected endpoint_ready=false (port unreachable)")
+	}
+}
+
+func TestManager_HealthCheckLocalOKPublicProbeOK(t *testing.T) {
+	localLn := localTCPListener(t)
+	publicLn := localTCPListener(t)
+	localPort := localLn.Addr().(*net.TCPAddr).Port
+	publicPort := publicLn.Addr().(*net.TCPAddr).Port
+
+	cfg := &SingboxConfig{
+		Enabled:              true,
+		ListenHost:           "127.0.0.1",
+		ListenPort:           localPort,
+		PublicEndpointHost:   "node.example.com",
+		PublicEndpointPort:   443,
+		PublicProbeEnabled:   true,
+		PublicProbeHost:      "127.0.0.1",
+		PublicProbePort:      publicPort,
+		PublicProbeTimeoutMs: 200,
+		HealthCheckMode:      string(HealthCheckBoth),
+	}
+	mgr := NewManager(cfg)
+	mgr.statusMu.Lock()
+	mgr.status.PID = os.Getpid()
+	mgr.status.Status = string(StatusRunning)
+	mgr.statusMu.Unlock()
+
+	mgr.HealthCheck()
+	s := mgr.Status()
+	if s.Status != string(StatusRunning) {
+		t.Fatalf("expected running, got %s", s.Status)
+	}
+	if !s.EndpointReady {
+		t.Fatalf("expected endpoint_ready=true, last_error=%s public_error=%s", s.LastError, s.PublicProbeLastErr)
+	}
+	if !s.PublicProbeEnabled || !s.PublicProbeOK {
+		t.Fatalf("expected public probe ok, enabled=%v ok=%v", s.PublicProbeEnabled, s.PublicProbeOK)
+	}
+}
+
+func TestManager_HealthCheckLocalOKPublicProbeFail(t *testing.T) {
+	localLn := localTCPListener(t)
+	localPort := localLn.Addr().(*net.TCPAddr).Port
+
+	cfg := &SingboxConfig{
+		Enabled:              true,
+		ListenHost:           "127.0.0.1",
+		ListenPort:           localPort,
+		PublicEndpointHost:   "node.example.com",
+		PublicEndpointPort:   443,
+		PublicProbeEnabled:   true,
+		PublicProbeHost:      "127.0.0.1",
+		PublicProbePort:      localPort + 1,
+		PublicProbeTimeoutMs: 50,
+	}
+	mgr := NewManager(cfg)
+	mgr.statusMu.Lock()
+	mgr.status.PID = os.Getpid()
+	mgr.status.Status = string(StatusRunning)
+	mgr.statusMu.Unlock()
+
+	mgr.HealthCheck()
+	s := mgr.Status()
+	if s.Status != string(StatusRunning) {
+		t.Fatalf("expected process status running, got %s", s.Status)
+	}
+	if s.EndpointReady {
+		t.Fatal("expected endpoint_ready=false when public probe fails")
+	}
+	if s.LastError != "endpoint_not_ready" {
+		t.Fatalf("expected endpoint_not_ready, got %q", s.LastError)
+	}
+	if s.PublicProbeOK {
+		t.Fatal("expected public_probe_ok=false")
+	}
+	if s.PublicProbeLastErr == "" {
+		t.Fatal("expected public probe last error")
+	}
+}
+
+func TestManager_HealthCheckPublicProbeDisabledUsesLocalAndFields(t *testing.T) {
+	localLn := localTCPListener(t)
+	localPort := localLn.Addr().(*net.TCPAddr).Port
+
+	cfg := &SingboxConfig{
+		Enabled:            true,
+		ListenHost:         "127.0.0.1",
+		ListenPort:         localPort,
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 443,
+	}
+	mgr := NewManager(cfg)
+	mgr.statusMu.Lock()
+	mgr.status.PID = os.Getpid()
+	mgr.status.Status = string(StatusRunning)
+	mgr.statusMu.Unlock()
+
+	mgr.HealthCheck()
+	s := mgr.Status()
+	if !s.EndpointReady {
+		t.Fatalf("expected endpoint_ready=true without public probe, got last_error=%s", s.LastError)
+	}
+	if s.PublicProbeEnabled {
+		t.Fatal("expected public_probe_enabled=false")
+	}
+}
+
+func TestManager_HealthCheckWildcardListenUsesLoopback(t *testing.T) {
+	localLn := localTCPListener(t)
+	localPort := localLn.Addr().(*net.TCPAddr).Port
+
+	cfg := &SingboxConfig{
+		Enabled:            true,
+		ListenHost:         "0.0.0.0",
+		ListenPort:         localPort,
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 443,
+	}
+	mgr := NewManager(cfg)
+	mgr.statusMu.Lock()
+	mgr.status.PID = os.Getpid()
+	mgr.status.Status = string(StatusRunning)
+	mgr.statusMu.Unlock()
+
+	mgr.HealthCheck()
+	s := mgr.Status()
+	if !s.EndpointReady {
+		t.Fatalf("expected wildcard listen health to dial loopback, got status=%s last_error=%s", s.Status, s.LastError)
 	}
 }
 
