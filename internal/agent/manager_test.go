@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -534,5 +535,168 @@ func TestManager_SingboxStatusNewFields(t *testing.T) {
 	}
 	if !status.Singbox.EndpointReady {
 		t.Fatal("expected endpoint_ready=true")
+	}
+}
+
+func TestManager_ReportEndpoint_Success(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "ep-node", NodeSecret: "ep-secret"})
+
+	var capturedReq EndpointReportRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/agent/node-endpoint" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		// Verify auth headers.
+		if r.Header.Get("X-Node-ID") != "ep-node" {
+			t.Fatalf("unexpected X-Node-ID: %s", r.Header.Get("X-Node-ID"))
+		}
+		if r.Header.Get("X-Timestamp") == "" {
+			t.Fatal("missing X-Timestamp")
+		}
+		if r.Header.Get("X-Signature") == "" {
+			t.Fatal("missing X-Signature")
+		}
+		// Decode body for verification.
+		if err := json.NewDecoder(r.Body).Decode(&capturedReq); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("ep-node", "ep-secret")
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled:            true,
+			Status:             "running",
+			Transport:          "mixed",
+			ProtocolProfile:    "tcp_udp",
+			PublicEndpointHost: "node1.example.com",
+			PublicEndpointPort: 8443,
+			EndpointReady:      true,
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, sbProvider)
+	mgr.LoadIdentity()
+
+	err := mgr.ReportEndpoint(context.Background())
+	if err != nil {
+		t.Fatalf("ReportEndpoint failed: %v", err)
+	}
+
+	// Verify status tracks endpoint report.
+	status := mgr.Status()
+	if status.LastEndpointReportAt == nil {
+		t.Fatal("expected LastEndpointReportAt to be set")
+	}
+	if !status.LastEndpointReportOK {
+		t.Fatal("expected LastEndpointReportOK=true")
+	}
+	if status.LastEndpointReportErr != "" {
+		t.Fatalf("unexpected LastEndpointReportErr: %s", status.LastEndpointReportErr)
+	}
+}
+
+func TestManager_ReportEndpoint_NoSingboxProvider(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "ep-node", NodeSecret: "ep-secret"})
+
+	client := NewClient("http://localhost:1", "v1.0")
+	client.SetNodeIdentity("ep-node", "ep-secret")
+
+	// Create manager with no singbox provider.
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, nil)
+	mgr.LoadIdentity()
+
+	err := mgr.ReportEndpoint(context.Background())
+	if err == nil {
+		t.Fatal("expected error for nil singbox provider")
+	}
+}
+
+func TestManager_ReportEndpoint_BackendFailure(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "ep-node", NodeSecret: "ep-secret"})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprint(w, `{"error":"internal error"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("ep-node", "ep-secret")
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled:            true,
+			Status:             "running",
+			PublicEndpointHost: "node1.example.com",
+			PublicEndpointPort: 8443,
+			Transport:          "ws",
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, sbProvider)
+	mgr.LoadIdentity()
+
+	err := mgr.ReportEndpoint(context.Background())
+	if err == nil {
+		t.Fatal("expected error for backend failure")
+	}
+
+	status := mgr.Status()
+	if status.LastEndpointReportAt == nil {
+		t.Fatal("expected LastEndpointReportAt to be set even on failure")
+	}
+	if status.LastEndpointReportOK {
+		t.Fatal("expected LastEndpointReportOK=false on failure")
+	}
+	if status.LastEndpointReportErr == "" {
+		t.Fatal("expected LastEndpointReportErr to be set on failure")
+	}
+}
+
+func TestManager_ReportEndpoint_Disabled(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "ep-node", NodeSecret: "ep-secret"})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("ep-node", "ep-secret")
+
+	// Singbox disabled.
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled: false,
+			Status:  "disabled",
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, sbProvider)
+	mgr.LoadIdentity()
+
+	// Nonsense, but it should not crash.
+	_ = mgr.ReportEndpoint(context.Background())
+
+	// The request should have enabled=false because the singbox is disabled.
+	status := mgr.Status()
+	if status.LastEndpointReportAt == nil {
+		t.Fatal("expected LastEndpointReportAt to be set")
 	}
 }

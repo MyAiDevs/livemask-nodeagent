@@ -189,3 +189,132 @@ func TestHeartbeat_Non200(t *testing.T) {
 		t.Fatal("expected error for non-200 heartbeat")
 	}
 }
+
+func TestRegisterNodeEndpoint_Success(t *testing.T) {
+	var capturedHeaders map[string]string
+	var capturedBody EndpointReportRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/internal/agent/node-endpoint" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+
+		capturedHeaders = map[string]string{
+			"X-Node-ID":    r.Header.Get("X-Node-ID"),
+			"X-Timestamp":  r.Header.Get("X-Timestamp"),
+			"X-Signature":  r.Header.Get("X-Signature"),
+		}
+		if capturedHeaders["X-Node-ID"] == "" {
+			t.Fatal("missing X-Node-ID header")
+		}
+		if capturedHeaders["X-Timestamp"] == "" {
+			t.Fatal("missing X-Timestamp header")
+		}
+		if capturedHeaders["X-Signature"] == "" {
+			t.Fatal("missing X-Signature header")
+		}
+
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("node-uuid", "node-secret")
+
+	req := &EndpointReportRequest{
+		PublicEndpointHost: "node1.example.com",
+		PublicEndpointPort: 443,
+		Transport:          "ws",
+		SNI:                "example.com",
+		ALPN:               "h2,http/1.1",
+		ProtocolProfile:    "vless-ws",
+		Enabled:            true,
+	}
+	resp, err := client.RegisterNodeEndpoint(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RegisterNodeEndpoint failed: %v", err)
+	}
+	if !resp.OK {
+		t.Fatal("expected OK=true")
+	}
+
+	// Verify request body.
+	if capturedBody.PublicEndpointHost != "node1.example.com" {
+		t.Fatalf("expected host node1.example.com, got %s", capturedBody.PublicEndpointHost)
+	}
+	if capturedBody.PublicEndpointPort != 443 {
+		t.Fatalf("expected port 443, got %d", capturedBody.PublicEndpointPort)
+	}
+	if capturedBody.Transport != "ws" {
+		t.Fatalf("expected transport ws, got %s", capturedBody.Transport)
+	}
+	if capturedBody.ProtocolProfile != "vless-ws" {
+		t.Fatalf("expected protocol_profile vless-ws, got %s", capturedBody.ProtocolProfile)
+	}
+	if !capturedBody.Enabled {
+		t.Fatal("expected enabled=true")
+	}
+
+	// Verify signature.
+	expectedSig := ComputeSignature("node-uuid", capturedHeaders["X-Timestamp"], "node-secret")
+	if capturedHeaders["X-Signature"] != expectedSig {
+		t.Fatalf("signature mismatch: got %s, expected %s", capturedHeaders["X-Signature"], expectedSig)
+	}
+}
+
+func TestRegisterNodeEndpoint_Non200(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":"NODE_SECRET_MISMATCH"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("node-uuid", "wrong-secret")
+	req := &EndpointReportRequest{
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 443,
+		Transport:          "ws",
+		Enabled:            true,
+	}
+	_, err := client.RegisterNodeEndpoint(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for non-200")
+	}
+}
+
+func TestRegisterNodeEndpoint_EmptyFields(t *testing.T) {
+	var capturedBody EndpointReportRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("node-uuid", "node-secret")
+
+	req := &EndpointReportRequest{
+		Enabled: false,
+	}
+	resp, err := client.RegisterNodeEndpoint(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RegisterNodeEndpoint failed: %v", err)
+	}
+	if !resp.OK {
+		t.Fatal("expected OK=true")
+	}
+	if capturedBody.Enabled {
+		t.Fatal("expected enabled=false")
+	}
+}

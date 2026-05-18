@@ -26,24 +26,29 @@ const (
 
 // Manager manages the NodeAgent lifecycle: registration, identity persistence,
 // heartbeat with HMAC signature, and system metrics collection.
-// TASK-NODE-001, extended with sing-box integration (TASK-NODEAGENT-SINGBOX-001).
+// TASK-NODE-001, extended with sing-box integration (TASK-NODEAGENT-SINGBOX-001)
+// and endpoint reporting (TASK-NODEAGENT-ENDPOINT-001).
 type Manager struct {
-	client         *Client
-	collector      MetricsCollector
-	configProvider ConfigProvider
-	identityStore  *IdentityStore
+	client          *Client
+	collector       MetricsCollector
+	configProvider  ConfigProvider
+	identityStore   *IdentityStore
 	singboxProvider SingboxStatusProvider
 
-	mu              sync.RWMutex
-	identity        *Identity
-	registered      bool
-	registerAt      *time.Time
-	registerErr     string
-	heartbeatsSent  int64
-	lastHeartbeatAt *time.Time
-	lastHeartbeatOK bool
+	mu               sync.RWMutex
+	identity         *Identity
+	registered       bool
+	registerAt       *time.Time
+	registerErr      string
+	heartbeatsSent   int64
+	lastHeartbeatAt  *time.Time
+	lastHeartbeatOK  bool
 	lastHeartbeatErr string
-	lastMetrics     *SystemMetrics
+	lastMetrics      *SystemMetrics
+
+	endpointReportAt  *time.Time
+	endpointReportOK  bool
+	endpointReportErr string
 
 	pollCtx    context.Context
 	pollCancel context.CancelFunc
@@ -315,6 +320,8 @@ func (m *Manager) Status() AgentStatus {
 		Degraded:         m.configProvider.IsDegraded(),
 		SingboxStatus:    m.getSingboxStatus(),
 		Singbox:          m.getSingboxRuntimeStatus(),
+		LastEndpointReportOK:  m.endpointReportOK,
+		LastEndpointReportErr: m.endpointReportErr,
 		LastSystemMetrics: m.lastMetrics,
 		IdentityFile:     m.identityStore.FilePath(),
 	}
@@ -329,6 +336,10 @@ func (m *Manager) Status() AgentStatus {
 	if m.lastHeartbeatAt != nil {
 		unix := m.lastHeartbeatAt.Unix()
 		s.LastHeartbeatAt = &unix
+	}
+	if m.endpointReportAt != nil {
+		unix := m.endpointReportAt.Unix()
+		s.LastEndpointReportAt = &unix
 	}
 
 	// Merge degraded reasons.
@@ -372,6 +383,47 @@ func (m *Manager) fireStatusHooks() {
 	for _, h := range hooks {
 		h(status)
 	}
+}
+
+// ReportEndpoint sends the current sing-box endpoint metadata to Backend via
+// POST /internal/agent/node-endpoint.  It is safe to call from any goroutine
+// and should be triggered after sing-box config changes or on startup.
+func (m *Manager) ReportEndpoint(ctx context.Context) error {
+	sb := m.getSingboxRuntimeStatus()
+	if sb == nil {
+		return fmt.Errorf("singbox provider not available")
+	}
+
+	req := &EndpointReportRequest{
+		PublicEndpointHost: sb.PublicEndpointHost,
+		PublicEndpointPort: sb.PublicEndpointPort,
+		Transport:          sb.Transport,
+		SNI:                "",
+		ALPN:               "",
+		ProtocolProfile:    sb.ProtocolProfile,
+		Enabled:            sb.Enabled && sb.Status == "running",
+	}
+
+	resp, err := m.client.RegisterNodeEndpoint(ctx, req)
+	now := time.Now()
+
+	m.mu.Lock()
+	m.endpointReportAt = &now
+	if err != nil {
+		m.endpointReportOK = false
+		m.endpointReportErr = err.Error()
+		m.mu.Unlock()
+		m.fireStatusHooks()
+		return fmt.Errorf("report endpoint: %w", err)
+	}
+	m.endpointReportOK = resp.OK
+	m.endpointReportErr = ""
+	m.mu.Unlock()
+
+	log.Printf("[agent] endpoint reported (host=%s, port=%d, transport=%s, enabled=%v, ok=%v)",
+		req.PublicEndpointHost, req.PublicEndpointPort, req.Transport, req.Enabled, resp.OK)
+	m.fireStatusHooks()
+	return nil
 }
 
 // ---- shared helpers ----

@@ -72,23 +72,26 @@ type SingboxStatusProvider interface {
 // AgentStatus is an observable snapshot of the agent's registration and
 // heartbeat state. Exposed via /agent/status HTTP endpoint.
 type AgentStatus struct {
-	IsDeployed        bool           `json:"is_deployed"`
-	Registered        bool           `json:"registered"`
-	IdentityFile      string         `json:"identity_file,omitempty"`
-	NodeID            string         `json:"node_id,omitempty"`
-	NodeStatus        string         `json:"node_status,omitempty"`
-	LastRegisterAt    *int64         `json:"last_register_at,omitempty"`
-	LastRegisterErr   string         `json:"last_register_error,omitempty"`
-	HeartbeatsSent    int64          `json:"heartbeats_sent"`
-	LastHeartbeatAt   *int64         `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatOK   bool           `json:"last_heartbeat_ok"`
-	LastHeartbeatErr  string         `json:"last_heartbeat_error,omitempty"`
-	HealthStatus      string         `json:"health_status"`
-	Degraded          bool           `json:"degraded"`
-	DegradedReason    string         `json:"degraded_reason,omitempty"`
-	SingboxStatus     string         `json:"singbox_status"`
+	IsDeployed        bool                  `json:"is_deployed"`
+	Registered        bool                  `json:"registered"`
+	IdentityFile      string                `json:"identity_file,omitempty"`
+	NodeID            string                `json:"node_id,omitempty"`
+	NodeStatus        string                `json:"node_status,omitempty"`
+	LastRegisterAt    *int64                `json:"last_register_at,omitempty"`
+	LastRegisterErr   string                `json:"last_register_error,omitempty"`
+	HeartbeatsSent    int64                 `json:"heartbeats_sent"`
+	LastHeartbeatAt   *int64                `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatOK   bool                  `json:"last_heartbeat_ok"`
+	LastHeartbeatErr  string                `json:"last_heartbeat_error,omitempty"`
+	HealthStatus      string                `json:"health_status"`
+	Degraded          bool                  `json:"degraded"`
+	DegradedReason    string                `json:"degraded_reason,omitempty"`
+	SingboxStatus     string                `json:"singbox_status"`
 	Singbox           *SingboxRuntimeStatus `json:"singbox,omitempty"`
-	LastSystemMetrics *SystemMetrics `json:"last_system_metrics,omitempty"`
+	LastEndpointReportAt  *int64            `json:"last_endpoint_report_at,omitempty"`
+	LastEndpointReportOK  bool              `json:"last_endpoint_report_ok"`
+	LastEndpointReportErr string            `json:"last_endpoint_report_error,omitempty"`
+	LastSystemMetrics *SystemMetrics        `json:"last_system_metrics,omitempty"`
 }
 
 // ConfigProvider defines the interface the agent manager uses to read the
@@ -97,4 +100,22 @@ type ConfigProvider interface {
 	ConfigVersion() int
 	ConfigHash() string
 	IsDegraded() bool
+}
+
+// EndpointReportRequest is sent via POST /internal/agent/node-endpoint to
+// report the node's public-facing sing-box endpoint metadata.
+// Matches Backend NodeEndpointRegisterRequest.
+type EndpointReportRequest struct {
+	PublicEndpointHost string `json:"public_endpoint_host"`
+	PublicEndpointPort int    `json:"public_endpoint_port"`
+	Transport          string `json:"transport"`
+	SNI                string `json:"sni"`
+	ALPN               string `json:"alpn"`
+	ProtocolProfile    string `json:"protocol_profile"`
+	Enabled            bool   `json:"enabled"`
+}
+
+// EndpointReportResponse is the response from POST /internal/agent/node-endpoint.
+type EndpointReportResponse struct {
+	OK bool `json:"ok"`
 }

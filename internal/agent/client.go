@@ -86,6 +86,56 @@ func (c *Client) Register(ctx context.Context, nodeName string) (*RegisterRespon
 	return &registerResp, nil
 }
 
+// RegisterNodeEndpoint sends POST /internal/agent/node-endpoint to upsert
+// the node's public-facing endpoint metadata. Requires NodeAuth (X-Node-ID,
+// X-Timestamp, X-Signature).
+func (c *Client) RegisterNodeEndpoint(ctx context.Context, req *EndpointReportRequest) (*EndpointReportResponse, error) {
+	u, err := url.JoinPath(c.backendURL, "/internal/agent/node-endpoint")
+	if err != nil {
+		return nil, fmt.Errorf("build node-endpoint url: %w", err)
+	}
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal node-endpoint request: %w", err)
+	}
+
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("create node-endpoint request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("X-Node-ID", c.nodeID)
+	httpReq.Header.Set("X-Timestamp", timestamp)
+
+	sig := ComputeSignature(c.nodeID, timestamp, c.nodeSecret)
+	httpReq.Header.Set("X-Signature", sig)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("node-endpoint http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read node-endpoint response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("node-endpoint unexpected status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var epResp EndpointReportResponse
+	if err := json.Unmarshal(respBody, &epResp); err != nil {
+		return nil, fmt.Errorf("unmarshal node-endpoint response: %w", err)
+	}
+	return &epResp, nil
+}
+
 // Heartbeat sends POST /internal/agent/heartbeat with HMAC auth headers:
 // X-Node-ID, X-Timestamp, X-Signature.
 func (c *Client) Heartbeat(ctx context.Context, hb *HeartbeatRequest) (*HeartbeatResponse, error) {

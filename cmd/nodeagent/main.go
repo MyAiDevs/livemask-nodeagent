@@ -90,6 +90,9 @@ func main() {
 	cfgClient := config.NewClient(configURL, "", agentVersion)
 	cfgStore := config.NewStore(cachePath)
 
+	// Use a deferred endpoint reporter that will be set after agentMgr is created.
+	var reportEndpoint func(ctx context.Context) error
+
 	applier := config.NewRuntimeApplier(func(old, new *config.RuntimeConfig) error {
 		log.Printf("[config] **** Applying config change ****")
 		log.Printf("[config]   heartbeat_interval:        %d -> %d",
@@ -157,6 +160,15 @@ func main() {
 			log.Printf("[config] singbox apply failed (continuing): %v", err)
 			return fmt.Errorf("singbox apply: %w", err)
 		}
+
+		// Report updated endpoint metadata to Backend (best-effort).
+		if reportEndpoint != nil {
+			epCtx, epCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer epCancel()
+			if epErr := reportEndpoint(epCtx); epErr != nil {
+				log.Printf("[config] endpoint report after config change: %v", epErr)
+			}
+		}
 		return nil
 	})
 	cfgMgr := config.NewManager(cfgClient, cfgStore, applier)
@@ -168,6 +180,11 @@ func main() {
 
 	// Agent Manager — cfgMgr implements ConfigProvider, singboxMgr implements SingboxStatusProvider.
 	agentMgr := agent.NewManager(agentClient, sysCollector, cfgMgr, identityStore, singboxMgr)
+
+	// Wire up deferred endpoint reporter for config change callback.
+	reportEndpoint = func(ctx context.Context) error {
+		return agentMgr.ReportEndpoint(ctx)
+	}
 
 	// ---- Sing-box: startup health and render on first config ----
 	sboxCtx, sboxCancel := context.WithCancel(context.Background())
@@ -236,6 +253,19 @@ func main() {
 		log.Printf("[main] Heartbeat loop started (interval=%v)", heartbeatInterval)
 	} else {
 		log.Println("[main] Heartbeat loop NOT started (no node identity)")
+	}
+
+	// ---- Initial endpoint reporting ----
+	if (hadIdentity || agentMgr.Status().Registered) && singboxEnabled {
+		epCtx, epCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if epErr := agentMgr.ReportEndpoint(epCtx); epErr != nil {
+			log.Printf("[main] Initial endpoint report failed (degraded): %v", epErr)
+		} else {
+			log.Printf("[main] Public endpoint metadata reported to Backend")
+		}
+		epCancel()
+	} else {
+		log.Printf("[main] Skipping endpoint report (identity=%v, singbox=%v)", hadIdentity || agentMgr.Status().Registered, singboxEnabled)
 	}
 
 	// ---- HTTP status endpoints ----
