@@ -335,21 +335,125 @@ func TestRender_TransportIsNotProtocolProfile(t *testing.T) {
 	}
 }
 
-func TestRender_ReservedProtocolProfile(t *testing.T) {
+func TestRender_Hysteria2ProtocolProfile(t *testing.T) {
+	t.Setenv("HYSTERIA2_AUTH", "test-auth-value")
+
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "singbox.json")
 
 	cfg := &SingboxConfig{
-		ConfigPath:      cfgPath,
-		ListenPort:      10808,
-		ProtocolProfile: "hysteria2",
+		ConfigPath:         cfgPath,
+		ListenHost:         "127.0.0.1",
+		ListenPort:         443,
+		ProtocolProfile:    "hysteria2",
+		Transport:          "udp",
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 8443,
+		TLSEnabled:         true,
+		SNI:                "node.example.com",
+		ALPN:               "h2",
+		Hysteria2UpMbps:    100,
+		Hysteria2DownMbps:  500,
+	}
+
+	if err := Render(cfg); err != nil {
+		t.Fatalf("Render hysteria2: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	inbounds := parsed["inbounds"].([]any)
+	if len(inbounds) != 1 {
+		t.Fatalf("expected 1 inbound, got %d", len(inbounds))
+	}
+	inbound := inbounds[0].(map[string]any)
+	if inbound["type"] != "hysteria2" {
+		t.Fatalf("expected type hysteria2, got %v", inbound["type"])
+	}
+	if inbound["listen"] != "127.0.0.1" {
+		t.Fatalf("expected listen 127.0.0.1, got %v", inbound["listen"])
+	}
+	if inbound["listen_port"] != float64(443) {
+		t.Fatalf("expected listen_port 443, got %v", inbound["listen_port"])
+	}
+
+	// Verify TLS config.
+	tlsConfig, ok := inbound["tls"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tls config")
+	}
+	if tlsConfig["server_name"] != "node.example.com" {
+		t.Fatalf("expected server_name node.example.com, got %v", tlsConfig["server_name"])
+	}
+
+	// Verify hysteria2 config block.
+	hy2Config, ok := inbound["hysteria2"].(map[string]any)
+	if !ok {
+		t.Fatal("expected hysteria2 config block")
+	}
+	if hy2Config["up_mbps"] != float64(100) {
+		t.Fatalf("expected up_mbps 100, got %v", hy2Config["up_mbps"])
+	}
+	if hy2Config["down_mbps"] != float64(500) {
+		t.Fatalf("expected down_mbps 500, got %v", hy2Config["down_mbps"])
+	}
+	auth, ok := hy2Config["auth"].(string)
+	if !ok || auth == "" {
+		t.Fatal("expected non-empty auth in hysteria2 config")
+	}
+
+	// Verify no secret markers in rendered JSON from other fields.
+	// Auth is expected in config since sing-box needs it to operate.
+}
+
+func TestRender_Hysteria2NoSecret_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singbox.json")
+
+	cfg := &SingboxConfig{
+		ConfigPath:         cfgPath,
+		ListenHost:         "127.0.0.1",
+		ListenPort:         443,
+		ProtocolProfile:    "hysteria2",
+		Transport:          "udp",
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 8443,
 	}
 	err := Render(cfg)
 	if err == nil {
-		t.Fatal("expected not implemented error")
+		t.Fatal("expected error for missing auth secret")
 	}
-	if !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("expected not implemented, got: %v", err)
+	for _, secret := range []string{"test-auth-value", "password=test", "private_key=value"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error should not contain secret: %s", secret)
+		}
+	}
+}
+
+func TestRender_ReservedProtocolProfiles(t *testing.T) {
+	for _, name := range []string{"vless_reality", "trojan", "shadowtls", "wireguard"} {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "singbox.json")
+		cfg := &SingboxConfig{
+			ConfigPath:      cfgPath,
+			ListenPort:      10808,
+			ProtocolProfile: name,
+		}
+		err := Render(cfg)
+		if err == nil {
+			t.Fatalf("expected not implemented error for %s", name)
+		}
+		if !strings.Contains(err.Error(), "not implemented") {
+			t.Fatalf("expected not implemented, got: %v", err)
+		}
 	}
 }
 

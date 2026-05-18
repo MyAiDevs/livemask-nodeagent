@@ -10,7 +10,7 @@ func init() {
 		MixedProfile{},
 		SocksProfile{},
 		TunProfile{},
-		ReservedProfile{name: "hysteria2"},
+		Hysteria2Profile{},
 		ReservedProfile{name: "vless_reality"},
 		ReservedProfile{name: "trojan"},
 		ReservedProfile{name: "shadowtls"},

@@ -191,8 +191,13 @@ func ToProtocolConfigWithHost(cfg *SingboxConfig, host string) sbprotocol.Protoc
 			ProxyOutboundTag: cfg.ProxyOutboundTag,
 		},
 		Raw: map[string]any{
-			"tun_interface_name": cfg.TunInterfaceName,
-			"tun_mtu":            cfg.TunMTU,
+			"tun_interface_name":       cfg.TunInterfaceName,
+			"tun_mtu":                  cfg.TunMTU,
+			"hysteria2_up_mbps":        cfg.Hysteria2UpMbps,
+			"hysteria2_down_mbps":      cfg.Hysteria2DownMbps,
+			"hysteria2_obfs_type":      cfg.Hysteria2ObfsType,
+			"hysteria2_auth_env":       cfg.Hysteria2AuthEnv,
+			"hysteria2_obfs_password_env": cfg.Hysteria2ObfsPasswordEnv,
 		},
 	}
 }

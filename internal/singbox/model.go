@@ -77,6 +77,12 @@ type SingboxConfig struct {
 	TLSEnabled bool   `json:"tls_enabled,omitempty"`
 	SNI        string `json:"sni,omitempty"`
 	ALPN       string `json:"alpn,omitempty"`
+	// Hysteria2-specific fields (TASK-NODEAGENT-HYSTERIA2-001).
+	Hysteria2UpMbps         int    `json:"hysteria2_up_mbps,omitempty"`
+	Hysteria2DownMbps       int    `json:"hysteria2_down_mbps,omitempty"`
+	Hysteria2ObfsType       string `json:"hysteria2_obfs_type,omitempty"`
+	Hysteria2AuthEnv        string `json:"hysteria2_auth_env,omitempty"`
+	Hysteria2ObfsPasswordEnv string `json:"hysteria2_obfs_password_env,omitempty"`
 	// Health probe configuration.
 	PublicProbeEnabled   bool   `json:"public_probe_enabled,omitempty"`
 	PublicProbeHost      string `json:"public_probe_host,omitempty"`

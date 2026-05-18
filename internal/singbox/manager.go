@@ -253,6 +253,12 @@ func (m *Manager) ApplyConfig(ctx context.Context, singCfg *SingboxConfig, confi
 		m.cfg.TLSEnabled = singCfg.TLSEnabled
 		m.cfg.SNI = singCfg.SNI
 		m.cfg.ALPN = singCfg.ALPN
+		// TASK-NODEAGENT-HYSTERIA2-001: hysteria2 fields.
+		m.cfg.Hysteria2UpMbps = singCfg.Hysteria2UpMbps
+		m.cfg.Hysteria2DownMbps = singCfg.Hysteria2DownMbps
+		m.cfg.Hysteria2ObfsType = singCfg.Hysteria2ObfsType
+		m.cfg.Hysteria2AuthEnv = singCfg.Hysteria2AuthEnv
+		m.cfg.Hysteria2ObfsPasswordEnv = singCfg.Hysteria2ObfsPasswordEnv
 		m.cfg.PublicProbeEnabled = singCfg.PublicProbeEnabled
 		m.cfg.PublicProbeHost = singCfg.PublicProbeHost
 		m.cfg.PublicProbePort = singCfg.PublicProbePort
