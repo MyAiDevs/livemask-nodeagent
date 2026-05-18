@@ -1,17 +1,5 @@
 package protocol
 
-// ProtocolProfile renders and describes one sing-box protocol profile.
-type ProtocolProfile interface {
-	Name() string
-	Validate(cfg ProtocolConfig) error
-	Render(cfg ProtocolConfig) (*RenderResult, error)
-	Endpoint(cfg ProtocolConfig) EndpointMetadata
-	HealthChecks(cfg ProtocolConfig) []HealthCheckSpec
-	SecretRefs(cfg ProtocolConfig) []SecretRef
-	Redact(cfg ProtocolConfig) ProtocolConfig
-	SupportsClientConfig() bool
-}
-
 type ProtocolConfig struct {
 	Profile            string
 	Transport          string
@@ -19,6 +7,8 @@ type ProtocolConfig struct {
 	ListenPort         int
 	PublicEndpointHost string
 	PublicEndpointPort int
+	SNI                string
+	ALPN               string
 	TLS                TLSConfig
 	DNS                DNSConfig
 	Route              RouteConfig
@@ -30,6 +20,8 @@ type TLSConfig struct {
 	Enabled bool
 	SNI     string
 	ALPN    string
+	CertRef string
+	KeyRef  string
 }
 
 type DNSConfig struct {
@@ -41,6 +33,7 @@ type DNSConfig struct {
 type RouteConfig struct {
 	Global           bool
 	BypassLAN        bool
+	FinalOutbound    string
 	ProxyOutboundTag string
 }
 
@@ -63,7 +56,13 @@ type EndpointMetadata struct {
 
 type HealthCheckSpec struct {
 	Name      string
-	Type      string
+	Type      string // tcp|udp|http|custom
+	Host      string
+	Port      int
+	TimeoutMS int
+	Optional  bool
+
+	// Backward-compatible fields for older internal tests and callers.
 	Target    string
 	Required  bool
 	TimeoutMs int
@@ -71,7 +70,7 @@ type HealthCheckSpec struct {
 
 type SecretRef struct {
 	Name         string
-	Source       string
+	Source       string // env|file|backend|local_generated
 	Required     bool
 	RotatePolicy string
 	RedactionKey string

@@ -89,7 +89,7 @@ func DefaultRuntimeConfig() RuntimeConfig {
 			ListenPort:                10808,
 			LogLevel:                  "info",
 			Transport:                 "mixed",
-			ProtocolProfile:           "tcp_udp",
+			ProtocolProfile:           "mixed",
 			DNSEnabled:                true,
 			DNSStrategy:               "prefer_ipv4",
 			DNSServers:                "1.1.1.1,8.8.8.8",

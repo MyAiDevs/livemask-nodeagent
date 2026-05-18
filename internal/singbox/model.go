@@ -24,7 +24,7 @@ type RuntimeStatus struct {
 	ListenHost         string `json:"listen_host"`
 	ListenPort         int    `json:"listen_port"`
 	Transport          string `json:"transport,omitempty"`        // socks / mixed / tun
-	ProtocolProfile    string `json:"protocol_profile,omitempty"` // tcp_udp / tcp_only / udp_only
+	ProtocolProfile    string `json:"protocol_profile,omitempty"` // mixed / socks / tun / reserved profiles
 	PublicEndpointHost string `json:"public_endpoint_host,omitempty"`
 	PublicEndpointPort int    `json:"public_endpoint_port,omitempty"`
 	EndpointReady      bool   `json:"endpoint_ready"`
@@ -61,7 +61,7 @@ type SingboxConfig struct {
 	ListenPort            int
 	LogLevel              string
 	Transport             string // socks, mixed, tun
-	ProtocolProfile       string // tcp_udp, tcp_only, udp_only
+	ProtocolProfile       string // mixed, socks, tun, or reserved future profile
 	PublicEndpointHost    string // public-facing host (may differ from listen)
 	PublicEndpointPort    int    // public-facing port (may differ from listen)
 	TunInterfaceName      string // tun device name (if transport=tun)

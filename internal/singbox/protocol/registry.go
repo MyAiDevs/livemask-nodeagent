@@ -3,6 +3,7 @@ package protocol
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -12,6 +13,13 @@ var legacyProtocolProfiles = map[string]bool{
 	"tcp_udp":  true,
 	"tcp_only": true,
 	"udp_only": true,
+	"singbox":  true,
+}
+
+var transportBackedProfiles = map[string]bool{
+	"mixed": true,
+	"socks": true,
+	"tun":   true,
 }
 
 type Registry struct {
@@ -27,7 +35,7 @@ func (r *Registry) Register(profile ProtocolProfile) error {
 	if profile == nil {
 		return fmt.Errorf("protocol profile is nil")
 	}
-	name := profile.Name()
+	name := NormalizeProfileName(profile.Name())
 	if name == "" {
 		return fmt.Errorf("protocol profile name is empty")
 	}
@@ -42,9 +50,7 @@ func (r *Registry) Register(profile ProtocolProfile) error {
 }
 
 func (r *Registry) Get(name string) (ProtocolProfile, bool) {
-	if name == "" || legacyProtocolProfiles[name] {
-		name = DefaultProfileName
-	}
+	name = NormalizeProfileName(name)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -72,26 +78,43 @@ func (r *Registry) Names() []string {
 	return names
 }
 
-var DefaultRegistry = NewRegistry()
+var defaultRegistry = NewRegistry()
+
+func DefaultRegistry() *Registry {
+	return defaultRegistry
+}
 
 func Register(profile ProtocolProfile) error {
-	return DefaultRegistry.Register(profile)
+	return defaultRegistry.Register(profile)
 }
 
 func Get(name string) (ProtocolProfile, bool) {
-	return DefaultRegistry.Get(name)
+	return defaultRegistry.Get(name)
 }
 
 func MustGet(name string) ProtocolProfile {
-	return DefaultRegistry.MustGet(name)
+	return defaultRegistry.MustGet(name)
+}
+
+func NormalizeProfileName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" || legacyProtocolProfiles[name] {
+		return DefaultProfileName
+	}
+	return name
 }
 
 func ResolveProfileName(cfg ProtocolConfig) string {
-	if cfg.Profile != "" && !legacyProtocolProfiles[cfg.Profile] {
-		return cfg.Profile
+	profile := strings.TrimSpace(strings.ToLower(cfg.Profile))
+	if profile != "" {
+		if legacyProtocolProfiles[profile] && transportBackedProfiles[strings.ToLower(cfg.Transport)] {
+			return strings.ToLower(cfg.Transport)
+		}
+		return NormalizeProfileName(profile)
 	}
-	if cfg.Transport != "" {
-		return cfg.Transport
+	transport := strings.TrimSpace(strings.ToLower(cfg.Transport))
+	if transportBackedProfiles[transport] {
+		return transport
 	}
 	return DefaultProfileName
 }

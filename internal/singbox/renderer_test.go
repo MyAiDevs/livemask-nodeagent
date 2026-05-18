@@ -294,7 +294,7 @@ func TestPublicProbeErrorSanitized(t *testing.T) {
 			t.Fatalf("expected sanitized error, got %s", errText)
 		}
 	}
-	if strings.Count(errText, "[redacted]") != 4 {
+	if strings.Count(errText, "<redacted>") != 4 {
 		t.Fatalf("expected redactions, got %s", errText)
 	}
 }
@@ -317,7 +317,7 @@ func TestRender_InvalidPublicEndpointPort(t *testing.T) {
 	}
 }
 
-func TestRender_InvalidTransport(t *testing.T) {
+func TestRender_TransportIsNotProtocolProfile(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "singbox.json")
 
@@ -326,12 +326,48 @@ func TestRender_InvalidTransport(t *testing.T) {
 		ListenPort: 10808,
 		Transport:  "hysteria2",
 	}
+	if err := Render(cfg); err != nil {
+		t.Fatalf("transport alone should not select a reserved protocol profile: %v", err)
+	}
+	data, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(data), `"type": "mixed"`) {
+		t.Fatalf("expected default mixed profile, got %s", string(data))
+	}
+}
+
+func TestRender_ReservedProtocolProfile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singbox.json")
+
+	cfg := &SingboxConfig{
+		ConfigPath:      cfgPath,
+		ListenPort:      10808,
+		ProtocolProfile: "hysteria2",
+	}
 	err := Render(cfg)
 	if err == nil {
-		t.Fatal("expected error for invalid transport")
+		t.Fatal("expected not implemented error")
 	}
-	if !strings.Contains(err.Error(), "transport") {
-		t.Fatalf("expected error about transport, got: %v", err)
+	if !strings.Contains(err.Error(), "not implemented") {
+		t.Fatalf("expected not implemented, got: %v", err)
+	}
+}
+
+func TestRender_LegacySingboxProfile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singbox.json")
+
+	cfg := &SingboxConfig{
+		ConfigPath:      cfgPath,
+		ListenPort:      10808,
+		ProtocolProfile: "singbox",
+	}
+	if err := Render(cfg); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	data, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(data), `"type": "mixed"`) {
+		t.Fatalf("expected mixed render for singbox alias, got %s", string(data))
 	}
 }
 

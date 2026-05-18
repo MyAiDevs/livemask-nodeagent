@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	sbprotocol "github.com/MyAiDevs/livemask-nodeagent/internal/singbox/protocol"
@@ -109,13 +108,16 @@ func Render(cfg *SingboxConfig) error {
 		logLevel = "info"
 	}
 
-	protocolCfg := protocolConfigFromSingbox(cfg, host)
+	protocolCfg := ToProtocolConfigWithHost(cfg, host)
 	profileName := sbprotocol.ResolveProfileName(protocolCfg)
 	profile, ok := sbprotocol.Get(profileName)
 	if !ok {
-		return fmt.Errorf("singbox transport/profile %q is not registered", sanitizeError(profileName))
+		return fmt.Errorf("singbox protocol profile %q is not registered", sanitizeError(profileName))
 	}
 	protocolCfg.Profile = profileName
+	if err := profile.Validate(protocolCfg); err != nil {
+		return fmt.Errorf("validate singbox protocol profile %q: %s", sanitizeError(profileName), sanitizeError(err.Error()))
+	}
 	rendered, err := profile.Render(protocolCfg)
 	if err != nil {
 		return fmt.Errorf("render singbox protocol profile %q: %s", sanitizeError(profileName), sanitizeError(err.Error()))
@@ -148,7 +150,21 @@ func Render(cfg *SingboxConfig) error {
 	return nil
 }
 
-func protocolConfigFromSingbox(cfg *SingboxConfig, host string) sbprotocol.ProtocolConfig {
+func ToProtocolConfig(cfg *SingboxConfig) sbprotocol.ProtocolConfig {
+	host := ""
+	if cfg != nil {
+		host = cfg.ListenHost
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return ToProtocolConfigWithHost(cfg, host)
+}
+
+func ToProtocolConfigWithHost(cfg *SingboxConfig, host string) sbprotocol.ProtocolConfig {
+	if cfg == nil {
+		return sbprotocol.ProtocolConfig{}
+	}
 	return sbprotocol.ProtocolConfig{
 		Profile:            cfg.ProtocolProfile,
 		Transport:          cfg.Transport,
@@ -156,6 +172,8 @@ func protocolConfigFromSingbox(cfg *SingboxConfig, host string) sbprotocol.Proto
 		ListenPort:         cfg.ListenPort,
 		PublicEndpointHost: cfg.PublicEndpointHost,
 		PublicEndpointPort: cfg.PublicEndpointPort,
+		SNI:                cfg.SNI,
+		ALPN:               cfg.ALPN,
 		TLS: sbprotocol.TLSConfig{
 			Enabled: cfg.TLSEnabled,
 			SNI:     cfg.SNI,
@@ -169,6 +187,7 @@ func protocolConfigFromSingbox(cfg *SingboxConfig, host string) sbprotocol.Proto
 		Route: sbprotocol.RouteConfig{
 			Global:           cfg.RouteGlobal,
 			BypassLAN:        cfg.BypassLAN,
+			FinalOutbound:    cfg.ProxyOutboundTag,
 			ProxyOutboundTag: cfg.ProxyOutboundTag,
 		},
 		Raw: map[string]any{
@@ -186,11 +205,11 @@ func profileForConfig(cfg *SingboxConfig) (sbprotocol.ProtocolProfile, sbprotoco
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	protocolCfg := protocolConfigFromSingbox(cfg, host)
+	protocolCfg := ToProtocolConfigWithHost(cfg, host)
 	profileName := sbprotocol.ResolveProfileName(protocolCfg)
 	profile, ok := sbprotocol.Get(profileName)
 	if !ok {
-		return nil, sbprotocol.ProtocolConfig{}, fmt.Errorf("singbox transport/profile %q is not registered", sanitizeError(profileName))
+		return nil, sbprotocol.ProtocolConfig{}, fmt.Errorf("singbox protocol profile %q is not registered", sanitizeError(profileName))
 	}
 	protocolCfg.Profile = profileName
 	return profile, protocolCfg, nil
@@ -378,30 +397,7 @@ func EffectivePublicProbeEnabled(cfg *SingboxConfig) bool {
 }
 
 func sanitizeError(message string) string {
-	if message == "" {
-		return ""
-	}
-	sanitized := message
-	lower := strings.ToLower(sanitized)
-	for _, marker := range []string{"node_secret", "password", "private_key", "access_key", "token"} {
-		for {
-			idx := strings.Index(lower, marker)
-			if idx == -1 {
-				break
-			}
-			end := idx + len(marker)
-			for end < len(sanitized) {
-				ch := sanitized[end]
-				if ch == ' ' || ch == ',' || ch == ';' || ch == ')' || ch == ']' {
-					break
-				}
-				end++
-			}
-			sanitized = sanitized[:idx] + "[redacted]" + sanitized[end:]
-			lower = strings.ToLower(sanitized)
-		}
-	}
-	return sanitized
+	return sbprotocol.RedactString(message)
 }
 
 func privateCIDRs() []string {

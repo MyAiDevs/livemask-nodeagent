@@ -58,6 +58,14 @@ func TestResolveProfileName_LegacyDefaultsToTransport(t *testing.T) {
 	if got != "socks" {
 		t.Fatalf("expected socks, got %s", got)
 	}
+	got = NormalizeProfileName("singbox")
+	if got != "mixed" {
+		t.Fatalf("expected singbox alias to mixed, got %s", got)
+	}
+	got = NormalizeProfileName("")
+	if got != "mixed" {
+		t.Fatalf("expected empty alias to mixed, got %s", got)
+	}
 	got = ResolveProfileName(ProtocolConfig{})
 	if got != DefaultProfileName {
 		t.Fatalf("expected default profile %s, got %s", DefaultProfileName, got)
@@ -84,11 +92,40 @@ func TestRedactConfig(t *testing.T) {
 			t.Fatalf("expected secret redacted, got %s", rawText)
 		}
 	}
-	if redacted.Raw["password"] != "[redacted]" {
+	if redacted.Raw["password"] != "<redacted>" {
 		t.Fatalf("expected password redacted, got %v", redacted.Raw["password"])
 	}
-	if redacted.Secrets[0].RedactionKey != "[redacted]" {
+	if redacted.Secrets[0].RedactionKey != "" {
+		t.Fatalf("expected empty redaction key to stay metadata-only, got %s", redacted.Secrets[0].RedactionKey)
+	}
+	cfg.Secrets[0].RedactionKey = "token"
+	redacted = RedactConfig(cfg)
+	if redacted.Secrets[0].RedactionKey != "<redacted>" {
 		t.Fatalf("expected redaction key, got %s", redacted.Secrets[0].RedactionKey)
+	}
+}
+
+func TestDefaultRegistryProfiles(t *testing.T) {
+	registry := DefaultRegistry()
+	for _, name := range []string{"mixed", "socks", "tun", "hysteria2", "vless_reality", "trojan", "shadowtls", "wireguard"} {
+		if _, ok := registry.Get(name); !ok {
+			t.Fatalf("expected profile %s to be registered", name)
+		}
+	}
+}
+
+func TestReservedProfileNotImplemented(t *testing.T) {
+	profile, ok := Get("hysteria2")
+	if !ok {
+		t.Fatal("hysteria2 profile not registered")
+	}
+	err := profile.Validate(ProtocolConfig{Profile: "hysteria2", ListenPort: 443})
+	if err == nil || !strings.Contains(err.Error(), "not implemented") {
+		t.Fatalf("expected not implemented, got %v", err)
+	}
+	_, err = profile.Render(ProtocolConfig{Profile: "hysteria2", ListenPort: 443})
+	if err == nil || !strings.Contains(err.Error(), "not implemented") {
+		t.Fatalf("expected render not implemented, got %v", err)
 	}
 }
 
