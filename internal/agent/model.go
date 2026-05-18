@@ -2,8 +2,9 @@
 // system metrics collection subsystem. TASK-NODE-001.
 package agent
 
+import "github.com/MyAiDevs/livemask-nodeagent/internal/singbox"
+
 // RegisterRequest matches Backend 02794f0 internal/node/types.go RegisterRequest.
-// POST /internal/agent/register (no auth).
 type RegisterRequest struct {
 	NodeID       string `json:"node_id,omitempty"`
 	NodeSecret   string `json:"node_secret,omitempty"`
@@ -13,16 +14,13 @@ type RegisterRequest struct {
 }
 
 // RegisterResponse matches Backend 02794f0 internal/node/types.go RegisterResponse.
-// node_secret is only returned on first registration.
 type RegisterResponse struct {
 	NodeID     string `json:"node_id"`
 	NodeSecret string `json:"node_secret,omitempty"`
-	Status     string `json:"status"` // pending_review / approved / active / rejected
+	Status     string `json:"status"`
 }
 
 // HeartbeatRequest matches Backend 02794f0 internal/node/types.go HeartbeatRequest.
-// POST /internal/agent/heartbeat (requires X-Node-ID, X-Timestamp, X-Signature).
-// Body fields only — node_id is extracted from header by middleware.
 type HeartbeatRequest struct {
 	AgentVersion      string  `json:"agent_version,omitempty"`
 	ConfigVersion     int     `json:"config_version"`
@@ -46,7 +44,6 @@ type HeartbeatResponse struct {
 }
 
 // SystemMetrics holds the self-collected system performance data.
-// Mapped into HeartbeatRequest fields before sending.
 type SystemMetrics struct {
 	CPUPercent        float64
 	MemoryPercent     float64
@@ -61,6 +58,15 @@ type SystemMetrics struct {
 type Identity struct {
 	NodeID     string `json:"node_id"`
 	NodeSecret string `json:"node_secret"`
+}
+
+// SingboxRuntimeStatus is a type alias for singbox.RuntimeStatus.
+type SingboxRuntimeStatus = singbox.RuntimeStatus
+
+// SingboxStatusProvider is an interface the agent manager uses to read
+// the current sing-box runtime status for heartbeat and observability.
+type SingboxStatusProvider interface {
+	Status() SingboxRuntimeStatus
 }
 
 // AgentStatus is an observable snapshot of the agent's registration and
@@ -81,6 +87,7 @@ type AgentStatus struct {
 	Degraded          bool           `json:"degraded"`
 	DegradedReason    string         `json:"degraded_reason,omitempty"`
 	SingboxStatus     string         `json:"singbox_status"`
+	Singbox           *SingboxRuntimeStatus `json:"singbox,omitempty"`
 	LastSystemMetrics *SystemMetrics `json:"last_system_metrics,omitempty"`
 }
 

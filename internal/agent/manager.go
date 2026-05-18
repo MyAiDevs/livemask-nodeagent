@@ -18,16 +18,21 @@ const (
 	SingboxStatusRunning  = "running"
 	SingboxStatusDegraded = "degraded"
 	SingboxStatusStopped  = "stopped"
+	SingboxStatusDisabled = "disabled"
+	SingboxStatusFailed   = "failed"
+	SingboxStatusUnhealthy = "unhealthy"
+	SingboxStatusStarting = "starting"
 )
 
 // Manager manages the NodeAgent lifecycle: registration, identity persistence,
 // heartbeat with HMAC signature, and system metrics collection.
-// Aligned to Backend commit 02794f0. TASK-NODE-001.
+// TASK-NODE-001, extended with sing-box integration (TASK-NODEAGENT-SINGBOX-001).
 type Manager struct {
 	client         *Client
 	collector      MetricsCollector
 	configProvider ConfigProvider
 	identityStore  *IdentityStore
+	singboxProvider SingboxStatusProvider
 
 	mu              sync.RWMutex
 	identity        *Identity
@@ -39,7 +44,6 @@ type Manager struct {
 	lastHeartbeatOK bool
 	lastHeartbeatErr string
 	lastMetrics     *SystemMetrics
-	singboxStatus   string
 
 	pollCtx    context.Context
 	pollCancel context.CancelFunc
@@ -49,30 +53,22 @@ type Manager struct {
 }
 
 // NewManager creates a new AgentManager.
-func NewManager(client *Client, collector MetricsCollector, configProvider ConfigProvider, identityStore *IdentityStore) *Manager {
+// singboxProvider may be nil; if nil, singbox status defaults to "unknown".
+func NewManager(client *Client, collector MetricsCollector, configProvider ConfigProvider,
+	identityStore *IdentityStore, singboxProvider SingboxStatusProvider) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		client:         client,
-		collector:      collector,
-		configProvider: configProvider,
-		identityStore:  identityStore,
-		pollCtx:        ctx,
-		pollCancel:     cancel,
-		singboxStatus:  SingboxStatusUnknown,
+		client:          client,
+		collector:       collector,
+		configProvider:  configProvider,
+		identityStore:   identityStore,
+		singboxProvider: singboxProvider,
+		pollCtx:         ctx,
+		pollCancel:      cancel,
 	}
 }
 
-// SetSingboxStatus allows the sing-box controller to update the sing-box
-// health status used in heartbeats.
-func (m *Manager) SetSingboxStatus(status string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.singboxStatus = status
-}
-
-// LoadIdentity attempts to load a previously persisted node identity. If
-// successful, the client is configured with the credentials and Register()
-// can be skipped on subsequent starts. Returns true if identity was loaded.
+// LoadIdentity attempts to load a previously persisted node identity.
 func (m *Manager) LoadIdentity() bool {
 	id, err := m.identityStore.Load()
 	if err != nil {
@@ -93,15 +89,10 @@ func (m *Manager) LoadIdentity() bool {
 	return true
 }
 
-// Register performs the startup registration. On success the returned
-// node_id and node_secret are persisted to disk and set on the client.
-// Registration is REQUIRED only on first start; subsequent starts use
-// LoadIdentity instead. If register fails, the agent continues in
-// degraded mode and does NOT exit.
+// Register performs the startup registration.
 func (m *Manager) Register(ctx context.Context, nodeName string) error {
-	// If we already have a local identity, inject it into the request.
 	m.mu.RLock()
-	id := m.identity // may be nil on first start
+	id := m.identity
 	m.mu.RUnlock()
 
 	if id != nil {
@@ -123,7 +114,6 @@ func (m *Manager) Register(ctx context.Context, nodeName string) error {
 	m.registerAt = &now
 	m.registerErr = ""
 
-	// If the Backend returned a node_secret (first registration), persist it.
 	if resp.NodeSecret != "" {
 		newID := &Identity{NodeID: resp.NodeID, NodeSecret: resp.NodeSecret}
 		if saveErr := m.identityStore.Save(newID); saveErr != nil {
@@ -133,7 +123,6 @@ func (m *Manager) Register(ctx context.Context, nodeName string) error {
 		m.client.SetNodeIdentity(resp.NodeID, resp.NodeSecret)
 		log.Printf("[agent] registered new node %s, secret persisted", resp.NodeID)
 	} else if id != nil {
-		// Re-registration — Backend did not return a new secret, keep existing.
 		log.Printf("[agent] re-registered node %s (status=%s)", resp.NodeID, resp.Status)
 	}
 	m.mu.Unlock()
@@ -171,6 +160,52 @@ func (m *Manager) StopHeartbeatLoop() {
 	m.pollWg.Wait()
 }
 
+// getSingboxStatus returns the current sing-box status from the provider.
+// Falls back to "unknown" if no provider is configured.
+func (m *Manager) getSingboxStatus() string {
+	if m.singboxProvider == nil {
+		return SingboxStatusUnknown
+	}
+	s := m.singboxProvider.Status()
+	switch s.Status {
+	case "disabled":
+		return SingboxStatusDisabled
+	case "stopped":
+		return SingboxStatusStopped
+	case "starting":
+		return SingboxStatusStarting
+	case "running":
+		return SingboxStatusRunning
+	case "unhealthy":
+		return SingboxStatusUnhealthy
+	case "failed":
+		return SingboxStatusFailed
+	default:
+		return SingboxStatusUnknown
+	}
+}
+
+// getSingboxRuntimeStatus returns the full sing-box runtime snapshot.
+func (m *Manager) getSingboxRuntimeStatus() *SingboxRuntimeStatus {
+	if m.singboxProvider == nil {
+		return nil
+	}
+	s := m.singboxProvider.Status()
+	return &SingboxRuntimeStatus{
+		Enabled:           s.Enabled,
+		Status:            s.Status,
+		PID:               s.PID,
+		ConfigPath:        s.ConfigPath,
+		ListenHost:        s.ListenHost,
+		ListenPort:        s.ListenPort,
+		LastStartedAt:     s.LastStartedAt,
+		LastStoppedAt:     s.LastStoppedAt,
+		LastHealthCheckAt: s.LastHealthCheckAt,
+		LastError:         s.LastError,
+		RestartCount:      s.RestartCount,
+	}
+}
+
 // sendHeartbeat collects metrics, builds the request, and posts to Backend.
 func (m *Manager) sendHeartbeat() error {
 	// Collect system metrics.
@@ -184,7 +219,7 @@ func (m *Manager) sendHeartbeat() error {
 		m.mu.Unlock()
 	}
 
-	// Build heartbeat request matching Backend HeartbeatRequest fields.
+	// Build heartbeat request.
 	m.mu.RLock()
 	cfgVersion := m.configProvider.ConfigVersion()
 	cfgHash := m.configProvider.ConfigHash()
@@ -193,16 +228,24 @@ func (m *Manager) sendHeartbeat() error {
 	if isDegraded {
 		degradedReason = "config subsystem degraded"
 	}
-
-	sbStatus := m.singboxStatus
 	m.mu.RUnlock()
+
+	sbStatus := m.getSingboxStatus()
+
+	// Determine degraded state: combine config degraded + sing-box unhealthy/failed.
+	if sbStatus == SingboxStatusFailed || sbStatus == SingboxStatusUnhealthy {
+		isDegraded = true
+		if degradedReason == "" {
+			degradedReason = fmt.Sprintf("singbox_%s", sbStatus)
+		} else {
+			degradedReason = degradedReason + fmt.Sprintf("; singbox_%s", sbStatus)
+		}
+	}
 
 	if metrics == nil {
 		metrics = &SystemMetrics{}
 	}
 
-	// Map SystemMetrics → Backend HeartbeatRequest fields.
-	// load_score is a coarse proxy from load_1.
 	loadScore := int(metrics.Load1 + 0.5)
 	if loadScore > 100 {
 		loadScore = 100
@@ -265,7 +308,8 @@ func (m *Manager) Status() AgentStatus {
 		LastHeartbeatErr: m.lastHeartbeatErr,
 		HealthStatus:     "healthy",
 		Degraded:         m.configProvider.IsDegraded(),
-		SingboxStatus:    m.singboxStatus,
+		SingboxStatus:    m.getSingboxStatus(),
+		Singbox:          m.getSingboxRuntimeStatus(),
 		LastSystemMetrics: m.lastMetrics,
 		IdentityFile:     m.identityStore.FilePath(),
 	}
@@ -281,12 +325,28 @@ func (m *Manager) Status() AgentStatus {
 		unix := m.lastHeartbeatAt.Unix()
 		s.LastHeartbeatAt = &unix
 	}
+
+	// Merge degraded reasons.
+	reasons := ""
 	if m.configProvider.IsDegraded() {
+		reasons = "config subsystem degraded"
+	}
+	if s.SingboxStatus == SingboxStatusFailed || s.SingboxStatus == SingboxStatusUnhealthy {
+		if reasons != "" {
+			reasons += "; "
+		}
+		reasons += fmt.Sprintf("singbox_%s", s.SingboxStatus)
+	}
+	if reasons != "" {
 		s.HealthStatus = "degraded"
-		s.DegradedReason = "config subsystem degraded"
+		s.Degraded = true
+		s.DegradedReason = reasons
 	}
 	if !m.lastHeartbeatOK && m.heartbeatsSent > 0 {
 		s.HealthStatus = "degraded"
+		if s.DegradedReason == "" {
+			s.DegradedReason = "heartbeat failed"
+		}
 	}
 	return s
 }

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/MyAiDevs/livemask-nodeagent/internal/singbox"
 )
 
 type mockCollector struct{}
@@ -33,16 +35,23 @@ func (m *mockConfigProvider) ConfigVersion() int   { return m.configVersion }
 func (m *mockConfigProvider) ConfigHash() string    { return m.configHash }
 func (m *mockConfigProvider) IsDegraded() bool      { return m.degraded }
 
+type mockSingboxProvider struct {
+	status singbox.RuntimeStatus
+}
+
+func (m *mockSingboxProvider) Status() SingboxRuntimeStatus {
+	return m.status
+}
+
 func TestManager_LoadIdentity(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "identity.json")
 	identityStore := NewIdentityStore(path)
 
-	// Save identity first.
 	_ = identityStore.Save(&Identity{NodeID: "saved-uuid", NodeSecret: "saved-secret"})
 
 	client := NewClient("http://localhost:1", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, nil)
 
 	loaded := mgr.LoadIdentity()
 	if !loaded {
@@ -59,7 +68,7 @@ func TestManager_LoadIdentityNoFile(t *testing.T) {
 	identityStore := NewIdentityStore(path)
 
 	client := NewClient("http://localhost:1", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, nil)
 
 	loaded := mgr.LoadIdentity()
 	if loaded {
@@ -83,7 +92,7 @@ func TestManager_RegisterNewNode(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, nil)
 
 	err := mgr.Register(context.Background(), "test-server")
 	if err != nil {
@@ -98,7 +107,6 @@ func TestManager_RegisterNewNode(t *testing.T) {
 		t.Fatalf("expected NodeID new-uuid, got %s", status.NodeID)
 	}
 
-	// Identity should be persisted.
 	loaded, _ := identityStore.Load()
 	if loaded == nil {
 		t.Fatal("identity should be persisted after registration")
@@ -122,14 +130,13 @@ func TestManager_RegisterFailure_NoExit(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, nil)
 
 	err := mgr.Register(context.Background(), "test-server")
 	if err == nil {
 		t.Fatal("expected register to fail")
 	}
 
-	// Agent must still be functional.
 	status := mgr.Status()
 	if status.IsDeployed != true {
 		t.Fatal("agent should still be deployed despite register failure")
@@ -156,7 +163,7 @@ func TestManager_HeartbeatWithHMAC(t *testing.T) {
 
 	client := NewClient(server.URL, "v1.0")
 	client.SetNodeIdentity("hb-node", "hb-secret")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 3, configHash: "sha256:abc"}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 3, configHash: "sha256:abc"}, identityStore, nil)
 
 	mgr.LoadIdentity()
 	err := mgr.sendHeartbeat()
@@ -164,7 +171,6 @@ func TestManager_HeartbeatWithHMAC(t *testing.T) {
 		t.Fatalf("heartbeat failed: %v", err)
 	}
 
-	// Verify the HMAC signature.
 	expectedSig := ComputeSignature("hb-node", capturedTimestamp, "hb-secret")
 	if capturedSig != expectedSig {
 		t.Fatalf("HMAC signature mismatch: got %s, expected %s", capturedSig, expectedSig)
@@ -193,7 +199,7 @@ func TestManager_HeartbeatDegraded(t *testing.T) {
 
 	client := NewClient(server.URL, "v1.0")
 	client.SetNodeIdentity("d-node", "d-secret")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 5, degraded: true}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 5, degraded: true}, identityStore, nil)
 	mgr.LoadIdentity()
 
 	err := mgr.sendHeartbeat()
@@ -219,7 +225,7 @@ func TestManager_HeartbeatBackendFailure_DegradedRetry(t *testing.T) {
 
 	client := NewClient(server.URL, "v1.0")
 	client.SetNodeIdentity("f-node", "f-secret")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, nil)
 	mgr.LoadIdentity()
 
 	err := mgr.sendHeartbeat()
@@ -256,7 +262,7 @@ func TestManager_HeartbeatLoopStartStop(t *testing.T) {
 
 	client := NewClient(server.URL, "v1.0")
 	client.SetNodeIdentity("l-node", "l-secret")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, nil)
 	mgr.LoadIdentity()
 
 	mgr.StartHeartbeatLoop(50 * time.Millisecond)
@@ -265,19 +271,6 @@ func TestManager_HeartbeatLoopStartStop(t *testing.T) {
 
 	if hbCount < 1 {
 		t.Fatalf("expected at least 1 heartbeat, got %d", hbCount)
-	}
-}
-
-func TestManager_SetSingboxStatus(t *testing.T) {
-	dir := t.TempDir()
-	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
-	client := NewClient("http://localhost:1", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore)
-
-	mgr.SetSingboxStatus(SingboxStatusRunning)
-	status := mgr.Status()
-	if status.SingboxStatus != SingboxStatusRunning {
-		t.Fatalf("expected singbox running, got %s", status.SingboxStatus)
 	}
 }
 
@@ -296,7 +289,7 @@ func TestManager_StatusHook(t *testing.T) {
 
 	client := NewClient(server.URL, "v1.0")
 	client.SetNodeIdentity("h-node", "h-secret")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, nil)
 	mgr.LoadIdentity()
 
 	var hookCalled bool
@@ -314,7 +307,7 @@ func TestManager_StatusSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
 	client := NewClient("http://localhost:1", "v1.0")
-	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 7, configHash: "sha256:xyz"}, identityStore)
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 7, configHash: "sha256:xyz"}, identityStore, nil)
 
 	status := mgr.Status()
 	if !status.IsDeployed {
@@ -325,5 +318,178 @@ func TestManager_StatusSnapshot(t *testing.T) {
 	}
 	if status.HeartbeatsSent != 0 {
 		t.Fatal("expected 0 heartbeats")
+	}
+}
+
+func TestManager_SingboxStatusRunning(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	client := NewClient("http://localhost:1", "v1.0")
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled: true,
+			Status:  "running",
+			PID:     1234,
+			ConfigPath: "/tmp/singbox.json",
+			ListenHost: "127.0.0.1",
+			ListenPort: 10808,
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, sbProvider)
+
+	status := mgr.Status()
+	if status.SingboxStatus != SingboxStatusRunning {
+		t.Fatalf("expected singbox_status running, got %s", status.SingboxStatus)
+	}
+	if status.Singbox == nil {
+		t.Fatal("expected singbox nested object")
+	}
+	if status.Singbox.PID != 1234 {
+		t.Fatalf("expected PID 1234, got %d", status.Singbox.PID)
+	}
+	if status.Degraded {
+		t.Fatal("expected not degraded when singbox running")
+	}
+}
+
+func TestManager_SingboxStatusFailedDegrades(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	client := NewClient("http://localhost:1", "v1.0")
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled:   true,
+			Status:    "failed",
+			LastError: "singbox_failed: port check failed",
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, sbProvider)
+
+	status := mgr.Status()
+	if status.SingboxStatus != SingboxStatusFailed {
+		t.Fatalf("expected singbox_status failed, got %s", status.SingboxStatus)
+	}
+	if !status.Degraded {
+		t.Fatal("expected degraded when singbox failed")
+	}
+	if status.DegradedReason != "singbox_failed" {
+		t.Fatalf("expected degraded_reason 'singbox_failed', got %q", status.DegradedReason)
+	}
+}
+
+func TestManager_SingboxStatusUnhealthyDegrades(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	client := NewClient("http://localhost:1", "v1.0")
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled:   true,
+			Status:    "unhealthy",
+			LastError: "process running but port unreachable",
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, sbProvider)
+
+	status := mgr.Status()
+	if status.SingboxStatus != SingboxStatusUnhealthy {
+		t.Fatalf("expected singbox_status unhealthy, got %s", status.SingboxStatus)
+	}
+	if !status.Degraded {
+		t.Fatal("expected degraded when singbox unhealthy")
+	}
+	if status.DegradedReason != "singbox_unhealthy" {
+		t.Fatalf("expected degraded_reason 'singbox_unhealthy', got %q", status.DegradedReason)
+	}
+}
+
+func TestManager_SingboxStatusDisabled(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	client := NewClient("http://localhost:1", "v1.0")
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled: false,
+			Status:  "disabled",
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, sbProvider)
+
+	status := mgr.Status()
+	if status.SingboxStatus != SingboxStatusDisabled {
+		t.Fatalf("expected singbox_status disabled, got %s", status.SingboxStatus)
+	}
+	if status.Degraded {
+		t.Fatal("expected not degraded when singbox disabled")
+	}
+}
+
+func TestManager_NoSingboxProvider(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	client := NewClient("http://localhost:1", "v1.0")
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{}, identityStore, nil)
+
+	status := mgr.Status()
+	if status.SingboxStatus != SingboxStatusUnknown {
+		t.Fatalf("expected singbox_status unknown, got %s", status.SingboxStatus)
+	}
+	if status.Singbox != nil {
+		t.Fatal("expected nil singbox object when no provider")
+	}
+}
+
+func TestManager_HeartbeatSingboxFailedDegrades(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "sb-node", NodeSecret: "sb-secret"})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/internal/agent/heartbeat" {
+			var hbReq HeartbeatRequest
+			// Verify singbox_status and degraded are correctly set.
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `{"ok":true,"server_config_version":1}`)
+			_ = hbReq
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "v1.0")
+	client.SetNodeIdentity("sb-node", "sb-secret")
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled:   true,
+			Status:    "failed",
+			LastError: "exited unexpectedly",
+		},
+	}
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, sbProvider)
+	mgr.LoadIdentity()
+
+	err := mgr.sendHeartbeat()
+	if err != nil {
+		t.Fatalf("heartbeat failed: %v", err)
+	}
+
+	status := mgr.Status()
+	if status.SingboxStatus != SingboxStatusFailed {
+		t.Fatalf("expected singbox_status failed, got %s", status.SingboxStatus)
+	}
+	if !status.Degraded {
+		t.Fatal("expected degraded=true")
+	}
+	if status.DegradedReason != "singbox_failed" {
+		t.Fatalf("expected degraded_reason 'singbox_failed', got %q", status.DegradedReason)
 	}
 }

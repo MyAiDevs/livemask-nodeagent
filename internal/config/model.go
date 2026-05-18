@@ -41,9 +41,12 @@ type DegradedConfig struct {
 	AutoRecover bool `json:"auto_recover"`
 }
 
-// SingboxConfig holds sing-box health check settings.
+// SingboxConfig holds sing-box health check and runtime settings.
 type SingboxConfig struct {
-	HealthCheckTimeoutSeconds int `json:"health_check_timeout_seconds"`
+	HealthCheckTimeoutSeconds int    `json:"health_check_timeout_seconds"`
+	ListenHost                string `json:"listen_host,omitempty"`
+	ListenPort                int    `json:"listen_port,omitempty"`
+	LogLevel                  string `json:"log_level,omitempty"`
 }
 
 // DefaultRuntimeConfig returns a safe default configuration.
@@ -61,6 +64,9 @@ func DefaultRuntimeConfig() RuntimeConfig {
 		},
 		Singbox: SingboxConfig{
 			HealthCheckTimeoutSeconds: 5,
+			ListenHost:                "127.0.0.1",
+			ListenPort:                10808,
+			LogLevel:                  "info",
 		},
 	}
 }

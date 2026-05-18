@@ -58,6 +58,14 @@ func (a *RuntimeApplier) Apply(old, new *RuntimeConfig) error {
 			Message: fmt.Sprintf("must be >= 1, got %d", new.Singbox.HealthCheckTimeoutSeconds),
 		}
 	}
+	if new.Singbox.ListenPort != 0 {
+		if new.Singbox.ListenPort < 1 || new.Singbox.ListenPort > 65535 {
+			return &ApplyError{
+				Field:   "singbox.listen_port",
+				Message: fmt.Sprintf("must be 1-65535, got %d", new.Singbox.ListenPort),
+			}
+		}
+	}
 
 	if a.onConfigChange == nil {
 		log.Printf("[config] dry-run: would apply config version (no callback registered)")
