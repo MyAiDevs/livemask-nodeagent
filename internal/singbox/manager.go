@@ -328,6 +328,9 @@ func (m *Manager) HealthCheck() {
 
 	// Check endpoint field readiness.
 	endpointReady, _ := IsEndpointReady(m.cfg)
+	if _, profileErr := ProfileHealthChecks(m.cfg); profileErr != nil {
+		endpointReady = false
+	}
 
 	// Public probe check.
 	publicProbeEnabled := EffectivePublicProbeEnabled(m.cfg)

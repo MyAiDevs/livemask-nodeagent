@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	sbprotocol "github.com/MyAiDevs/livemask-nodeagent/internal/singbox/protocol"
 )
 
 func TestRender_ProductionSchema(t *testing.T) {
@@ -199,6 +201,34 @@ func TestRender_SocksTransport(t *testing.T) {
 	}
 }
 
+func TestRender_FakeProfileDispatch(t *testing.T) {
+	profileName := "fake-renderer-dispatch"
+	_ = sbprotocol.Register(&fakeProtocolProfile{name: profileName})
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singbox.json")
+	cfg := &SingboxConfig{
+		ConfigPath:      cfgPath,
+		ListenPort:      10808,
+		ProtocolProfile: profileName,
+	}
+
+	if err := Render(cfg); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	data, _ := os.ReadFile(cfgPath)
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	inbounds := parsed["inbounds"].([]any)
+	inbound := inbounds[0].(map[string]any)
+	if inbound["type"] != "mixed" || inbound["tag"] != "fake-in" {
+		t.Fatalf("expected fake profile inbound, got %+v", inbound)
+	}
+}
+
 func TestRender_RouteGlobal(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "singbox.json")
@@ -302,6 +332,45 @@ func TestRender_InvalidTransport(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "transport") {
 		t.Fatalf("expected error about transport, got: %v", err)
+	}
+}
+
+func TestRender_UnknownProtocolProfile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singbox.json")
+
+	cfg := &SingboxConfig{
+		ConfigPath:      cfgPath,
+		ListenPort:      10808,
+		ProtocolProfile: "missing-profile",
+	}
+	err := Render(cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown profile")
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("expected not registered error, got: %v", err)
+	}
+}
+
+func TestRender_ProfileErrorSanitized(t *testing.T) {
+	profileName := "fake-secret-error"
+	_ = sbprotocol.Register(&fakeProtocolProfile{name: profileName, renderErr: "token=abc password=secret private_key=value"})
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singbox.json")
+	err := Render(&SingboxConfig{
+		ConfigPath:      cfgPath,
+		ListenPort:      10808,
+		ProtocolProfile: profileName,
+	})
+	if err == nil {
+		t.Fatal("expected render error")
+	}
+	for _, secret := range []string{"token=abc", "password=secret", "private_key=value"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("expected sanitized error, got %v", err)
+		}
 	}
 }
 
@@ -432,3 +501,73 @@ func TestRender_NoDNSWhenDisabled(t *testing.T) {
 		t.Fatal("dns section should not be present when disabled")
 	}
 }
+
+func TestProfileEndpointMetadata(t *testing.T) {
+	ep, err := ProfileEndpointMetadata(&SingboxConfig{
+		ListenPort:         10808,
+		Transport:          "mixed",
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 443,
+		TLSEnabled:         true,
+		SNI:                "node.example.com",
+		ALPN:               "h2",
+	})
+	if err != nil {
+		t.Fatalf("ProfileEndpointMetadata: %v", err)
+	}
+	if ep.Host != "node.example.com" || ep.Port != 443 || ep.Transport != "mixed" || ep.SNI != "node.example.com" {
+		t.Fatalf("unexpected endpoint metadata: %+v", ep)
+	}
+}
+
+func TestProfileHealthChecks(t *testing.T) {
+	checks, err := ProfileHealthChecks(&SingboxConfig{
+		ListenHost: "127.0.0.1",
+		ListenPort: 10808,
+		Transport:  "socks",
+	})
+	if err != nil {
+		t.Fatalf("ProfileHealthChecks: %v", err)
+	}
+	if len(checks) != 1 || checks[0].Type != "tcp" || !strings.Contains(checks[0].Target, "10808") {
+		t.Fatalf("unexpected checks: %+v", checks)
+	}
+}
+
+type fakeProtocolProfile struct {
+	name      string
+	renderErr string
+}
+
+func (p *fakeProtocolProfile) Name() string                             { return p.name }
+func (p *fakeProtocolProfile) Validate(sbprotocol.ProtocolConfig) error { return nil }
+func (p *fakeProtocolProfile) Render(sbprotocol.ProtocolConfig) (*sbprotocol.RenderResult, error) {
+	if p.renderErr != "" {
+		return nil, errString(p.renderErr)
+	}
+	return &sbprotocol.RenderResult{
+		Inbounds: []map[string]any{{
+			"type":        "mixed",
+			"tag":         "fake-in",
+			"listen":      "127.0.0.1",
+			"listen_port": 10808,
+		}},
+	}, nil
+}
+func (p *fakeProtocolProfile) Endpoint(cfg sbprotocol.ProtocolConfig) sbprotocol.EndpointMetadata {
+	return sbprotocol.EndpointMetadata{Host: cfg.PublicEndpointHost, Port: cfg.PublicEndpointPort, ProtocolProfile: p.name}
+}
+func (p *fakeProtocolProfile) HealthChecks(sbprotocol.ProtocolConfig) []sbprotocol.HealthCheckSpec {
+	return []sbprotocol.HealthCheckSpec{{Name: "fake", Type: "tcp", Required: true}}
+}
+func (p *fakeProtocolProfile) SecretRefs(cfg sbprotocol.ProtocolConfig) []sbprotocol.SecretRef {
+	return cfg.Secrets
+}
+func (p *fakeProtocolProfile) Redact(cfg sbprotocol.ProtocolConfig) sbprotocol.ProtocolConfig {
+	return sbprotocol.RedactConfig(cfg)
+}
+func (p *fakeProtocolProfile) SupportsClientConfig() bool { return false }
+
+type errString string
+
+func (e errString) Error() string { return string(e) }

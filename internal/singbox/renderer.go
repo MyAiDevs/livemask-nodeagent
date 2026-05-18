@@ -8,15 +8,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sbprotocol "github.com/MyAiDevs/livemask-nodeagent/internal/singbox/protocol"
 )
 
 // singboxConfigFile is the JSON structure for the sing-box config file.
 type singboxConfigFile struct {
 	Log       *logConfig       `json:"log,omitempty"`
-	Inbounds  []inboundConfig  `json:"inbounds"`
-	Outbounds []outboundConfig `json:"outbounds"`
-	Route     *routeConfig     `json:"route,omitempty"`
-	DNS       *dnsConfig       `json:"dns,omitempty"`
+	Inbounds  []map[string]any `json:"inbounds"`
+	Outbounds []map[string]any `json:"outbounds"`
+	Route     map[string]any   `json:"route,omitempty"`
+	DNS       map[string]any   `json:"dns,omitempty"`
 }
 
 type logConfig struct {
@@ -98,9 +100,6 @@ func Render(cfg *SingboxConfig) error {
 	if cfg.PublicProbePort != 0 && (cfg.PublicProbePort <= 0 || cfg.PublicProbePort > 65535) {
 		return fmt.Errorf("singbox public probe port %d is invalid (must be 1-65535)", cfg.PublicProbePort)
 	}
-	if cfg.Transport != "" && cfg.Transport != "mixed" && cfg.Transport != "socks" && cfg.Transport != "tun" {
-		return fmt.Errorf("singbox transport %q is invalid (must be mixed, socks, or tun)", cfg.Transport)
-	}
 	host := cfg.ListenHost
 	if host == "" {
 		host = "127.0.0.1"
@@ -110,12 +109,27 @@ func Render(cfg *SingboxConfig) error {
 		logLevel = "info"
 	}
 
+	protocolCfg := protocolConfigFromSingbox(cfg, host)
+	profileName := sbprotocol.ResolveProfileName(protocolCfg)
+	profile, ok := sbprotocol.Get(profileName)
+	if !ok {
+		return fmt.Errorf("singbox transport/profile %q is not registered", sanitizeError(profileName))
+	}
+	protocolCfg.Profile = profileName
+	rendered, err := profile.Render(protocolCfg)
+	if err != nil {
+		return fmt.Errorf("render singbox protocol profile %q: %s", sanitizeError(profileName), sanitizeError(err.Error()))
+	}
+	if rendered == nil {
+		return fmt.Errorf("render singbox protocol profile %q returned nil result", profileName)
+	}
+
 	sf := singboxConfigFile{
 		Log:       &logConfig{Level: logLevel},
-		Inbounds:  buildInbounds(cfg, host),
-		Outbounds: buildOutbounds(cfg),
-		Route:     buildRoute(cfg),
-		DNS:       buildDNS(cfg),
+		Inbounds:  rendered.Inbounds,
+		Outbounds: firstNonEmptyMaps(rendered.Outbounds, buildOutbounds(cfg)),
+		Route:     firstNonNilMap(rendered.Route, buildRoute(cfg)),
+		DNS:       firstNonNilMap(rendered.DNS, buildDNS(cfg)),
 	}
 
 	data, err := json.MarshalIndent(sf, "", "  ")
@@ -134,146 +148,162 @@ func Render(cfg *SingboxConfig) error {
 	return nil
 }
 
-func buildInbounds(cfg *SingboxConfig, host string) []inboundConfig {
-	var inbounds []inboundConfig
-
-	transport := cfg.Transport
-	if transport == "" {
-		transport = "mixed"
+func protocolConfigFromSingbox(cfg *SingboxConfig, host string) sbprotocol.ProtocolConfig {
+	return sbprotocol.ProtocolConfig{
+		Profile:            cfg.ProtocolProfile,
+		Transport:          cfg.Transport,
+		ListenHost:         host,
+		ListenPort:         cfg.ListenPort,
+		PublicEndpointHost: cfg.PublicEndpointHost,
+		PublicEndpointPort: cfg.PublicEndpointPort,
+		TLS: sbprotocol.TLSConfig{
+			Enabled: cfg.TLSEnabled,
+			SNI:     cfg.SNI,
+			ALPN:    cfg.ALPN,
+		},
+		DNS: sbprotocol.DNSConfig{
+			Enabled:  cfg.DNSEnabled,
+			Strategy: cfg.DNSStrategy,
+			Servers:  append([]string(nil), cfg.DNSServers...),
+		},
+		Route: sbprotocol.RouteConfig{
+			Global:           cfg.RouteGlobal,
+			BypassLAN:        cfg.BypassLAN,
+			ProxyOutboundTag: cfg.ProxyOutboundTag,
+		},
+		Raw: map[string]any{
+			"tun_interface_name": cfg.TunInterfaceName,
+			"tun_mtu":            cfg.TunMTU,
+		},
 	}
-
-	if transport == "tun" {
-		iface := cfg.TunInterfaceName
-		if iface == "" {
-			iface = "singbox-tun0"
-		}
-		mtu := cfg.TunMTU
-		if mtu <= 0 {
-			mtu = 1500
-		}
-		inbounds = append(inbounds, inboundConfig{
-			Type:          "tun",
-			Tag:           "tun-in",
-			InterfaceName: iface,
-			MTU:           mtu,
-		})
-	}
-
-	if transport == "socks" || transport == "mixed" || transport == "tun" {
-		inboundType := transport
-		if transport == "tun" {
-			inboundType = "mixed"
-		}
-		serviceInbound := inboundConfig{
-			Type:       inboundType,
-			Tag:        "service-in",
-			Listen:     host,
-			ListenPort: cfg.ListenPort,
-		}
-		if cfg.TLSEnabled {
-			serviceInbound.TLS = &inboundTLSConfig{
-				Enabled:    true,
-				ServerName: cfg.SNI,
-				ALPN:       parseALPN(cfg.ALPN),
-			}
-		}
-		inbounds = append(inbounds, serviceInbound)
-	}
-
-	return inbounds
 }
 
-// parseALPN splits a comma-separated ALPN string (e.g. "h2,http/1.1") into a slice.
-func parseALPN(alpn string) []string {
-	if alpn == "" {
-		return nil
+func profileForConfig(cfg *SingboxConfig) (sbprotocol.ProtocolProfile, sbprotocol.ProtocolConfig, error) {
+	if cfg == nil {
+		return nil, sbprotocol.ProtocolConfig{}, fmt.Errorf("singbox config is nil")
 	}
-	var parts []string
-	for _, p := range strings.Split(alpn, ",") {
-		s := strings.TrimSpace(p)
-		if s != "" {
-			parts = append(parts, s)
-		}
+	host := cfg.ListenHost
+	if host == "" {
+		host = "127.0.0.1"
 	}
-	return parts
+	protocolCfg := protocolConfigFromSingbox(cfg, host)
+	profileName := sbprotocol.ResolveProfileName(protocolCfg)
+	profile, ok := sbprotocol.Get(profileName)
+	if !ok {
+		return nil, sbprotocol.ProtocolConfig{}, fmt.Errorf("singbox transport/profile %q is not registered", sanitizeError(profileName))
+	}
+	protocolCfg.Profile = profileName
+	return profile, protocolCfg, nil
 }
 
-func buildOutbounds(cfg *SingboxConfig) []outboundConfig {
-	outbounds := []outboundConfig{
-		{Type: "direct", Tag: "direct"},
-		{Type: "block", Tag: "block"},
+func ProfileEndpointMetadata(cfg *SingboxConfig) (sbprotocol.EndpointMetadata, error) {
+	profile, protocolCfg, err := profileForConfig(cfg)
+	if err != nil {
+		return sbprotocol.EndpointMetadata{}, err
+	}
+	return profile.Endpoint(protocolCfg), nil
+}
+
+func ProfileHealthChecks(cfg *SingboxConfig) ([]sbprotocol.HealthCheckSpec, error) {
+	profile, protocolCfg, err := profileForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return profile.HealthChecks(protocolCfg), nil
+}
+
+func firstNonEmptyMaps(primary, fallback []map[string]any) []map[string]any {
+	if len(primary) > 0 {
+		return primary
+	}
+	return fallback
+}
+
+func firstNonNilMap(primary, fallback map[string]any) map[string]any {
+	if primary != nil {
+		return primary
+	}
+	return fallback
+}
+
+func buildOutbounds(cfg *SingboxConfig) []map[string]any {
+	outbounds := []map[string]any{
+		{"type": "direct", "tag": "direct"},
+		{"type": "block", "tag": "block"},
 	}
 
 	// Add proxy placeholder outbound if a tag is specified.
 	if cfg.ProxyOutboundTag != "" {
-		outbounds = append(outbounds, outboundConfig{
-			Type: "direct", // placeholder — will be replaced with real proxy
-			Tag:  cfg.ProxyOutboundTag,
+		outbounds = append(outbounds, map[string]any{
+			"type": "direct", // placeholder - will be replaced with real proxy
+			"tag":  cfg.ProxyOutboundTag,
 		})
 	}
 
 	return outbounds
 }
 
-func buildRoute(cfg *SingboxConfig) *routeConfig {
-	r := &routeConfig{Final: "direct", AutoDetect: true}
+func buildRoute(cfg *SingboxConfig) map[string]any {
+	r := map[string]any{"final": "direct", "auto_detect_interface": true}
 
 	if cfg.RouteGlobal && cfg.ProxyOutboundTag != "" {
-		r.Final = cfg.ProxyOutboundTag
+		r["final"] = cfg.ProxyOutboundTag
 	}
 
-	var rules []ruleConfig
+	var rules []map[string]any
 
 	if cfg.BypassLAN {
 		// Bypass private/LAN IP ranges.
-		rules = append(rules, ruleConfig{
-			Outbound: "direct",
-			IPCIDR:   privateCIDRs(),
+		rules = append(rules, map[string]any{
+			"outbound": "direct",
+			"ip_cidr":  privateCIDRs(),
 		})
 	}
 
 	// DNS query rule.
-	rules = append(rules, ruleConfig{
-		Outbound: "dns-out",
-		Network:  "udp",
-		Port:     []int{53},
+	rules = append(rules, map[string]any{
+		"outbound": "dns-out",
+		"network":  "udp",
+		"port":     []int{53},
 	})
 
 	// If not global, default outbound is still direct for non-proxied traffic.
 	if len(rules) > 0 {
-		r.Rules = rules
+		r["rules"] = rules
 	}
 	return r
 }
 
-func buildDNS(cfg *SingboxConfig) *dnsConfig {
+func buildDNS(cfg *SingboxConfig) map[string]any {
 	if !cfg.DNSEnabled {
 		return nil
 	}
 
-	d := &dnsConfig{
-		Enabled:  true,
-		Strategy: cfg.DNSStrategy,
-		Final:    "dns-default",
+	d := map[string]any{
+		"enabled":  true,
+		"strategy": cfg.DNSStrategy,
+		"final":    "dns-default",
 	}
 
+	var servers []map[string]any
 	if len(cfg.DNSServers) > 0 {
 		for i, addr := range cfg.DNSServers {
 			tag := fmt.Sprintf("dns-srv-%d", i+1)
-			d.Servers = append(d.Servers, dnsServerConfig{
-				Tag:     tag,
-				Address: addr,
+			servers = append(servers, map[string]any{
+				"tag":     tag,
+				"address": addr,
 			})
 		}
 	}
 
 	// Default server if none specified.
-	if len(d.Servers) == 0 {
-		d.Servers = append(d.Servers, dnsServerConfig{
-			Tag:     "dns-default",
-			Address: "https://1.1.1.1/dns-query",
+	if len(servers) == 0 {
+		servers = append(servers, map[string]any{
+			"tag":     "dns-default",
+			"address": "https://1.1.1.1/dns-query",
 		})
 	}
+	d["servers"] = servers
 
 	return d
 }
