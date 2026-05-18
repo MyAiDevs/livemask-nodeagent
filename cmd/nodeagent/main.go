@@ -40,6 +40,7 @@ import (
 
 	"github.com/MyAiDevs/livemask-nodeagent/internal/agent"
 	"github.com/MyAiDevs/livemask-nodeagent/internal/config"
+	"github.com/MyAiDevs/livemask-nodeagent/internal/geoip"
 	"github.com/MyAiDevs/livemask-nodeagent/internal/singbox"
 )
 
@@ -69,6 +70,13 @@ func main() {
 	singboxListenPort := envIntOrDefault("SINGBOX_LISTEN_PORT", 10808)
 	singboxRestartOnConfig := envBoolOrDefault("SINGBOX_RESTART_ON_CONFIG_CHANGE", true)
 
+	// GeoIP configuration.
+	geoipEnabled := envBoolOrDefault("GEOIP_ENABLED", false)
+	geoipProfile := envOrDefault("GEOIP_PROFILE", "country")
+	geoipFormat := envOrDefault("GEOIP_FORMAT", "maxmind-mmdb")
+	geoipCacheDir := envOrDefault("GEOIP_CACHE_DIR", "/var/lib/nodeagent/geoip")
+	geoipCheckIntervalSec := envIntOrDefault("GEOIP_CHECK_INTERVAL_SEC", 86400)
+
 	backendBaseURL = strings.TrimRight(backendBaseURL, "/")
 
 	// ---- Build the sing-box runtime manager ----
@@ -92,6 +100,7 @@ func main() {
 
 	// Use a deferred endpoint reporter that will be set after agentMgr is created.
 	var reportEndpoint func(ctx context.Context) error
+	var geoipMgr *geoip.GeoIPManager // captured by config applier
 
 	applier := config.NewRuntimeApplier(func(old, new *config.RuntimeConfig) error {
 		log.Printf("[config] **** Applying config change ****")
@@ -191,6 +200,16 @@ func main() {
 	})
 	cfgMgr := config.NewManager(cfgClient, cfgStore, applier)
 
+	// ---- Build the GeoIP subsystem ----
+	geoipClient := geoip.NewClient(backendBaseURL, "", "", agentVersion)
+	geoipStorage := geoip.NewStorage(geoipCacheDir, geoipProfile)
+	geoipMgr = geoip.NewGeoIPManager(geoipEnabled, geoipProfile, geoip.Format(geoipFormat), geoipClient, geoipStorage,
+		geoip.WithCheckInterval(time.Duration(geoipCheckIntervalSec)*time.Second))
+
+	// Register config change handler for GeoIP settings.
+	// The applier closure (defined above) captures geoipMgr and will be updated
+	// when config changes are applied.
+
 	// ---- Build the agent subsystem ----
 	agentClient := agent.NewClient(backendBaseURL, agentVersion)
 	sysCollector := agent.NewSystemCollector()
@@ -236,10 +255,18 @@ func main() {
 		log.Printf("[main] Identity loaded — skipping registration")
 	}
 
-	// Update config client with real node_id after registration.
+	// Update config client and geoip client with real node_id after registration.
 	agentStatus := agentMgr.Status()
 	if agentStatus.NodeID != "" {
 		cfgClient.SetNodeID(agentStatus.NodeID)
+	}
+
+	// Set geoip client identity from the same source as the agent's heartbeat.
+	// We reload from the identity store to avoid exposing nodeSecret through
+	// the agent's public API.
+	if id, idErr := identityStore.Load(); idErr == nil && id != nil {
+		geoipClient.SetNodeIdentity(id.NodeID, id.NodeSecret)
+		log.Printf("[main] GeoIP client identity set to node %s", id.NodeID)
 	}
 
 	// ---- Startup: load last-known-good config, then sync ----
@@ -260,6 +287,19 @@ func main() {
 		log.Printf("[main] Initial config synced to version %d", cfgMgr.Status().ConfigVersion)
 	} else {
 		log.Printf("[main] Config is current (version %d)", cfgMgr.Status().ConfigVersion)
+	}
+
+	// ---- GeoIP: load cached data, initial sync, start polling ----
+	if geoipEnabled {
+		geoipMgr.LoadCached()
+		gCtx, gCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if syncErr := geoipMgr.Sync(gCtx); syncErr != nil {
+			log.Printf("[main] GeoIP initial sync failed (will retry in background): %v", syncErr)
+		}
+		gCancel()
+		geoipMgr.StartPoll()
+	} else {
+		log.Println("[main] GeoIP sync disabled")
 	}
 
 	// ---- Background polling (config + heartbeat) ----
@@ -301,6 +341,17 @@ func main() {
 		if !hadIdentity && !as.Registered {
 			status = "degraded"
 		}
+		// GeoIP: if enabled and stale/expired, mark degraded but do not exit.
+		// TASK-NODEAGENT-GEOIP-001.
+		if geoipEnabled && geoipMgr != nil {
+			gs := geoipMgr.Status()
+			// Only degrade if geoip has been synced (has a last check time) and is now stale/failed.
+			if gs.LastCheckAt != nil && !geoipMgr.IsFresh() {
+				if gs.Status == geoip.StatusStale || gs.Status == geoip.StatusFailed {
+					status = "degraded"
+				}
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintf(w, `{"status":%q,"timestamp":%d}`, status, time.Now().Unix())
 	})
@@ -330,7 +381,67 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		_ = enc.Encode(agentMgr.Status())
+		// Include geoip status in agent status response.
+		type agentStatusWithGeoIP struct {
+			agent.AgentStatus
+			GeoIP *geoip.GeoIPStatus `json:"geoip,omitempty"`
+		}
+		s := agentStatusWithGeoIP{
+			AgentStatus: agentMgr.Status(),
+		}
+		if geoipMgr != nil {
+			gs := geoipMgr.Status()
+			s.GeoIP = &gs
+		}
+		_ = enc.Encode(s)
+	})
+	mux.HandleFunc("/geoip/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if geoipMgr != nil {
+			_ = enc.Encode(geoipMgr.Status())
+		} else {
+			_, _ = fmt.Fprint(w, `{"error":"geoip not initialized"}`)
+		}
+	})
+	mux.HandleFunc("/geoip/sync", func(w http.ResponseWriter, r *http.Request) {
+		if geoipMgr == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, `{"error":"geoip not initialized"}`)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
+		if err := geoipMgr.Sync(ctx); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprintf(w, `{"error":%q}`, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(geoipMgr.Status())
+	})
+	mux.HandleFunc("/geoip/rollback", func(w http.ResponseWriter, r *http.Request) {
+		if geoipMgr == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, `{"error":"geoip not initialized"}`)
+			return
+		}
+		ok, err := geoipMgr.RollbackToLKG()
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprintf(w, `{"error":%q}`, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"rolled_back":%v}`, ok)
 	})
 
 	server := &http.Server{
@@ -350,6 +461,9 @@ func main() {
 		// Stop subsystems in reverse order.
 		agentMgr.StopHeartbeatLoop()
 		cfgMgr.StopPoll()
+		if geoipMgr != nil {
+			geoipMgr.StopPoll()
+		}
 
 		// Stop sing-box.
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)

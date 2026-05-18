@@ -26,6 +26,17 @@ type RuntimeConfig struct {
 	Reporting     ReportingConfig `json:"reporting"`
 	DegradedMode  DegradedConfig  `json:"degraded_mode"`
 	Singbox       SingboxConfig   `json:"singbox"`
+	GeoIP         GeoIPConfig     `json:"geoip,omitempty"`
+}
+
+// GeoIPConfig holds GeoIP database sync configuration.
+// TASK-NODEAGENT-GEOIP-001.
+type GeoIPConfig struct {
+	Enabled          bool   `json:"enabled"`
+	Profile          string `json:"profile,omitempty"`
+	Format           string `json:"format,omitempty"`
+	CheckIntervalSec int    `json:"check_interval_sec,omitempty"`
+	CacheDir         string `json:"cache_dir,omitempty"`
 }
 
 // ReportingConfig holds intervals and buffering limits.
@@ -96,6 +107,13 @@ func DefaultRuntimeConfig() RuntimeConfig {
 			RouteGlobal:               false,
 			BypassLAN:                 true,
 			HealthCheckMode:           "local",
+		},
+		GeoIP: GeoIPConfig{
+			Enabled:          false,
+			Profile:          "country",
+			Format:           "maxmind-mmdb",
+			CheckIntervalSec: 86400,
+			CacheDir:         "/var/lib/nodeagent/geoip",
 		},
 	}
 }
