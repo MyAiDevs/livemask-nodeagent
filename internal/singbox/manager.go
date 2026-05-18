@@ -22,7 +22,7 @@ const (
 )
 
 // Manager manages the lifecycle of a local sing-box process.
-// TASK-NODEAGENT-SINGBOX-001.
+// TASK-NODEAGENT-SINGBOX-001, TASK-NODEAGENT-SINGBOX-002.
 type Manager struct {
 	cfg        *SingboxConfig
 	status     RuntimeStatus
@@ -31,7 +31,7 @@ type Manager struct {
 	cmdMu      sync.Mutex
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
-	configHash string // tracks last applied config hash for restart-if-changed
+	configHash string
 }
 
 // NewManager creates a new sing-box Manager using the supplied config.
@@ -39,28 +39,34 @@ func NewManager(cfg *SingboxConfig) *Manager {
 	return &Manager{
 		cfg: cfg,
 		status: RuntimeStatus{
-			Enabled:    cfg.Enabled,
-			Status:     string(StatusDisabled),
-			ConfigPath: cfg.ConfigPath,
-			ListenHost: cfg.ListenHost,
-			ListenPort: cfg.ListenPort,
+			Enabled:            cfg.Enabled,
+			Status:             string(StatusDisabled),
+			ConfigPath:         cfg.ConfigPath,
+			ListenHost:         cfg.ListenHost,
+			ListenPort:         cfg.ListenPort,
+			Transport:          cfg.Transport,
+			ProtocolProfile:    cfg.ProtocolProfile,
+			PublicEndpointHost: cfg.PublicEndpointHost,
+			PublicEndpointPort: cfg.PublicEndpointPort,
+			EndpointReady:      false,
 		},
 	}
 }
 
-// Start launches the sing-box process. If the manager is disabled or already
-// running, it is a no-op.  Errors are returned but never cause a panic.
+// Start launches the sing-box process.
 func (m *Manager) Start(ctx context.Context) error {
 	m.statusMu.Lock()
 	m.status.LastError = ""
 
 	if !m.cfg.Enabled {
 		m.status.Status = string(StatusDisabled)
+		m.status.EndpointReady = false
 		m.statusMu.Unlock()
 		return nil
 	}
 
 	if m.status.Status == string(StatusRunning) {
+		m.status.Status = string(StatusRunning)
 		m.statusMu.Unlock()
 		return nil
 	}
@@ -68,7 +74,6 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.status.Status = string(StatusStarting)
 	m.statusMu.Unlock()
 
-	// Ensure config file exists.
 	if _, err := os.Stat(m.cfg.ConfigPath); err != nil {
 		m.setFailed(fmt.Sprintf("config not found: %v", err))
 		return fmt.Errorf("singbox config not found: %w", err)
@@ -83,11 +88,9 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	args := []string{"run", "-c", m.cfg.ConfigPath}
-
 	cmd := exec.CommandContext(ctx, binPath, args...)
 	cmd.Dir = m.cfg.WorkDir
 
-	// Redirect stdout/stderr to log file.
 	if m.cfg.LogPath != "" {
 		f, err := os.OpenFile(m.cfg.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
@@ -111,19 +114,19 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.status.LastStartedAt = &now
 	m.status.LastError = ""
 	m.status.RestartCount++
+	m.status.EndpointReady = false
 	m.statusMu.Unlock()
 
-	// Wait for process exit in background.
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		if err := cmd.Wait(); err != nil {
-			// Process exited with error.
 			stopTime := time.Now().Unix()
 			m.statusMu.Lock()
 			if m.status.Status != string(StatusStopped) {
 				m.status.Status = string(StatusFailed)
 				m.status.LastStoppedAt = &stopTime
+				m.status.EndpointReady = false
 				if m.status.LastError == "" {
 					m.status.LastError = fmt.Sprintf("exited: %v", err)
 				}
@@ -134,9 +137,6 @@ func (m *Manager) Start(ctx context.Context) error {
 	}()
 
 	log.Printf("[singbox] started (pid=%d, config=%s)", cmd.Process.Pid, m.cfg.ConfigPath)
-
-	// Update status to running after a brief check.
-	// The health check loop will settle the real status.
 	m.statusMu.Lock()
 	m.status.Status = string(StatusRunning)
 	m.statusMu.Unlock()
@@ -144,8 +144,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully terminates the sing-box process. It sends SIGTERM and waits
-// up to DefaultStopTimeout, then SIGKILL if still alive.
+// Stop gracefully terminates the sing-box process.
 func (m *Manager) Stop(ctx context.Context) error {
 	m.cmdMu.Lock()
 	cmd := m.cmd
@@ -155,6 +154,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		m.statusMu.Lock()
 		m.status.Status = string(StatusStopped)
 		m.status.PID = 0
+		m.status.EndpointReady = false
 		now := time.Now().Unix()
 		m.status.LastStoppedAt = &now
 		m.statusMu.Unlock()
@@ -162,13 +162,10 @@ func (m *Manager) Stop(ctx context.Context) error {
 	}
 
 	log.Printf("[singbox] stopping (pid=%d)", cmd.Process.Pid)
-
-	// Send SIGTERM.
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		log.Printf("[singbox] sigterm failed: %v", err)
 	}
 
-	// Wait up to DefaultStopTimeout.
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
@@ -176,7 +173,6 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 	select {
 	case <-time.After(DefaultStopTimeout):
-		// Force kill.
 		if err := cmd.Process.Kill(); err != nil {
 			log.Printf("[singbox] kill failed: %v", err)
 		}
@@ -191,6 +187,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 	m.status.Status = string(StatusStopped)
 	m.status.LastStoppedAt = &now
 	m.status.LastError = ""
+	m.status.EndpointReady = false
 	m.statusMu.Unlock()
 
 	log.Println("[singbox] stopped")
@@ -217,39 +214,57 @@ func (m *Manager) Status() RuntimeStatus {
 	return m.status
 }
 
-// ApplyConfig processes a config update: renders the config file and restarts
-// sing-box if enabled and the config changed.  On failure it preserves the
-// old state and returns an error; the caller should set degraded flag.
+// ApplyConfig processes a config update.
 func (m *Manager) ApplyConfig(ctx context.Context, singCfg *SingboxConfig, configHash string) error {
 	if !m.cfg.Enabled {
 		return nil
 	}
 
-	// Render the new config file.
 	if err := Render(singCfg); err != nil {
 		m.setFailed(fmt.Sprintf("config render: %v", err))
 		return fmt.Errorf("render singbox config: %w", err)
 	}
 
-	// If hash is the same, no restart needed.
 	if configHash != "" && configHash == m.configHash {
 		return nil
 	}
 
 	m.configHash = configHash
 
+	// Propagate updated config fields to internal config so Start() uses them.
+	if singCfg != nil {
+		m.cfg.ListenHost = singCfg.ListenHost
+		m.cfg.ListenPort = singCfg.ListenPort
+		m.cfg.LogLevel = singCfg.LogLevel
+		m.cfg.Transport = singCfg.Transport
+		m.cfg.ProtocolProfile = singCfg.ProtocolProfile
+		m.cfg.PublicEndpointHost = singCfg.PublicEndpointHost
+		m.cfg.PublicEndpointPort = singCfg.PublicEndpointPort
+		m.cfg.TunInterfaceName = singCfg.TunInterfaceName
+		m.cfg.TunMTU = singCfg.TunMTU
+		m.cfg.DNSEnabled = singCfg.DNSEnabled
+		m.cfg.DNSStrategy = singCfg.DNSStrategy
+		m.cfg.DNSServers = singCfg.DNSServers
+		m.cfg.RouteGlobal = singCfg.RouteGlobal
+		m.cfg.BypassLAN = singCfg.BypassLAN
+		m.cfg.ProxyOutboundTag = singCfg.ProxyOutboundTag
+
+		// Update runtime status with new fields.
+		m.statusMu.Lock()
+		m.status.Transport = singCfg.Transport
+		m.status.ProtocolProfile = singCfg.ProtocolProfile
+		m.status.PublicEndpointHost = singCfg.PublicEndpointHost
+		m.status.PublicEndpointPort = singCfg.PublicEndpointPort
+		m.statusMu.Unlock()
+	}
+
 	if m.cfg.RestartOnConfigChange {
 		return m.Restart(ctx)
 	}
-
-	// No restart needed — just apply config for next manual restart.
 	return nil
 }
 
 // HealthCheck performs a single health check and updates the status.
-// It checks:
-//  1. Process is alive
-//  2. Listen port is reachable
 func (m *Manager) HealthCheck() {
 	m.statusMu.Lock()
 	status := &m.status
@@ -260,20 +275,20 @@ func (m *Manager) HealthCheck() {
 		status.Status = string(StatusDisabled)
 		status.PID = 0
 		status.LastError = ""
+		status.EndpointReady = false
 		m.statusMu.Unlock()
 		return
 	}
 
-	// Check process.
 	pid := status.PID
 	m.statusMu.Unlock()
 
 	processAlive := m.isProcessAlive(pid)
 	if !processAlive && pid == 0 {
-		// Expected stopped state.
 		m.statusMu.Lock()
 		status.Status = string(StatusStopped)
 		status.LastError = ""
+		status.EndpointReady = false
 		m.statusMu.Unlock()
 		return
 	}
@@ -282,6 +297,7 @@ func (m *Manager) HealthCheck() {
 		m.statusMu.Lock()
 		status.Status = string(StatusFailed)
 		status.PID = 0
+		status.EndpointReady = false
 		if status.LastError == "" {
 			status.LastError = "process not running"
 		}
@@ -289,18 +305,37 @@ func (m *Manager) HealthCheck() {
 		return
 	}
 
-	// Process is alive — check port.
-	if m.checkPort(status.ListenHost, status.ListenPort) {
+	// Process alive — check listen port.
+	portOK := m.checkPort(m.cfg.ListenHost, m.cfg.ListenPort)
+
+	// Check endpoint readiness.
+	endpointReady, epReason := IsEndpointReady(m.cfg)
+	if !endpointReady {
 		m.statusMu.Lock()
-		status.Status = string(StatusRunning)
-		status.LastError = ""
+		if portOK {
+			status.Status = string(StatusRunning)
+			status.LastError = epReason
+		} else {
+			status.Status = string(StatusUnhealthy)
+			status.LastError = "process running but port unreachable"
+		}
+		status.EndpointReady = false
 		m.statusMu.Unlock()
 		return
 	}
 
-	// Process alive but port unreachable.
+	if portOK {
+		m.statusMu.Lock()
+		status.Status = string(StatusRunning)
+		status.LastError = ""
+		status.EndpointReady = true
+		m.statusMu.Unlock()
+		return
+	}
+
 	m.statusMu.Lock()
 	status.Status = string(StatusUnhealthy)
+	status.EndpointReady = false
 	status.LastError = "process running but port unreachable"
 	m.statusMu.Unlock()
 }
@@ -315,7 +350,7 @@ func (m *Manager) StartHealthLoop(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				m.HealthCheck() // final check
+				m.HealthCheck()
 				return
 			case <-ticker.C:
 				m.HealthCheck()
@@ -324,7 +359,7 @@ func (m *Manager) StartHealthLoop(ctx context.Context) {
 	}()
 }
 
-// WaitForShutdown blocks until all goroutines exit. Call after context cancel.
+// WaitForShutdown blocks until all goroutines exit.
 func (m *Manager) WaitForShutdown() {
 	m.wg.Wait()
 }
@@ -336,6 +371,7 @@ func (m *Manager) setFailed(reason string) {
 	defer m.statusMu.Unlock()
 	m.status.Status = string(StatusFailed)
 	m.status.LastError = reason
+	m.status.EndpointReady = false
 	log.Printf("[singbox] %s", reason)
 }
 
@@ -347,7 +383,6 @@ func (m *Manager) isProcessAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	// Sending signal 0 checks if process is alive without actually signalling.
 	return process.Signal(syscall.Signal(0)) == nil
 }
 

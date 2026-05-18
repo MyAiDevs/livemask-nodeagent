@@ -1,6 +1,6 @@
 // Package singbox implements the NodeAgent sing-box runtime lifecycle:
 // config rendering, process management, and health checking.
-// TASK-NODEAGENT-SINGBOX-001.
+// TASK-NODEAGENT-SINGBOX-001, TASK-NODEAGENT-SINGBOX-002.
 package singbox
 
 // Status represents the current sing-box runtime status.
@@ -17,29 +17,46 @@ const (
 
 // RuntimeStatus is the full observable state of the sing-box runtime.
 type RuntimeStatus struct {
-	Enabled         bool   `json:"enabled"`
-	Status          string `json:"status"`
-	PID             int    `json:"pid"`
-	ConfigPath      string `json:"config_path"`
-	ListenHost      string `json:"listen_host"`
-	ListenPort      int    `json:"listen_port"`
-	LastStartedAt   *int64 `json:"last_started_at,omitempty"`
-	LastStoppedAt   *int64 `json:"last_stopped_at,omitempty"`
-	LastHealthCheckAt *int64 `json:"last_health_check_at,omitempty"`
-	LastError       string `json:"last_error,omitempty"`
-	RestartCount    int    `json:"restart_count"`
+	Enabled            bool   `json:"enabled"`
+	Status             string `json:"status"`
+	PID                int    `json:"pid"`
+	ConfigPath         string `json:"config_path"`
+	ListenHost         string `json:"listen_host"`
+	ListenPort         int    `json:"listen_port"`
+	Transport          string `json:"transport,omitempty"`           // socks / mixed / tun
+	ProtocolProfile    string `json:"protocol_profile,omitempty"`    // tcp_udp / tcp_only / udp_only
+	PublicEndpointHost string `json:"public_endpoint_host,omitempty"`
+	PublicEndpointPort int    `json:"public_endpoint_port,omitempty"`
+	EndpointReady      bool   `json:"endpoint_ready"`
+	LastStartedAt      *int64 `json:"last_started_at,omitempty"`
+	LastStoppedAt      *int64 `json:"last_stopped_at,omitempty"`
+	LastHealthCheckAt  *int64 `json:"last_health_check_at,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
+	RestartCount       int    `json:"restart_count"`
 }
 
 // SingboxConfig is the generation input for the sing-box config file.
 // It is populated from the config center payload + env overrides.
 type SingboxConfig struct {
-	Enabled    bool
-	BinPath    string
-	ConfigPath string
-	WorkDir    string
-	LogPath    string
-	ListenHost string
-	ListenPort int
-	LogLevel   string
+	Enabled               bool
+	BinPath               string
+	ConfigPath            string
+	WorkDir               string
+	LogPath               string
+	ListenHost            string
+	ListenPort            int
+	LogLevel              string
+	Transport             string // socks, mixed, tun
+	ProtocolProfile       string // tcp_udp, tcp_only, udp_only
+	PublicEndpointHost    string // public-facing host (may differ from listen)
+	PublicEndpointPort    int    // public-facing port (may differ from listen)
+	TunInterfaceName      string // tun device name (if transport=tun)
+	TunMTU                int    // tun MTU (if transport=tun)
+	DNSEnabled            bool
+	DNSStrategy           string // prefer_ipv4, prefer_ipv6, ipv4_only, ipv6_only
+	DNSServers            []string
+	RouteGlobal           bool   // global proxy (no bypass)
+	BypassLAN             bool   // bypass local/private ranges
+	ProxyOutboundTag      string // outbound tag for proxy (e.g. "proxy")
 	RestartOnConfigChange bool
 }

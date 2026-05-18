@@ -454,11 +454,8 @@ func TestManager_HeartbeatSingboxFailedDegrades(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/internal/agent/heartbeat" {
-			var hbReq HeartbeatRequest
-			// Verify singbox_status and degraded are correctly set.
 			w.WriteHeader(http.StatusOK)
 			_, _ = fmt.Fprint(w, `{"ok":true,"server_config_version":1}`)
-			_ = hbReq
 		}
 	}))
 	defer server.Close()
@@ -491,5 +488,51 @@ func TestManager_HeartbeatSingboxFailedDegrades(t *testing.T) {
 	}
 	if status.DegradedReason != "singbox_failed" {
 		t.Fatalf("expected degraded_reason 'singbox_failed', got %q", status.DegradedReason)
+	}
+}
+
+func TestManager_SingboxStatusNewFields(t *testing.T) {
+	dir := t.TempDir()
+	identityStore := NewIdentityStore(filepath.Join(dir, "identity.json"))
+	_ = identityStore.Save(&Identity{NodeID: "ep-node", NodeSecret: "ep-secret"})
+
+	sbProvider := &mockSingboxProvider{
+		status: singbox.RuntimeStatus{
+			Enabled:            true,
+			Status:             "running",
+			ListenHost:         "0.0.0.0",
+			ListenPort:         10808,
+			Transport:          "mixed",
+			ProtocolProfile:    "tcp_udp",
+			PublicEndpointHost: "node1.example.com",
+			PublicEndpointPort: 8443,
+			EndpointReady:      true,
+		},
+	}
+
+	client := NewClient("http://localhost:1", "v1.0")
+	client.SetNodeIdentity("ep-node", "ep-secret")
+
+	mgr := NewManager(client, &mockCollector{}, &mockConfigProvider{configVersion: 1}, identityStore, sbProvider)
+	mgr.LoadIdentity()
+
+	status := mgr.Status()
+	if status.Singbox == nil {
+		t.Fatal("expected singbox status to be non-nil")
+	}
+	if status.Singbox.Transport != "mixed" {
+		t.Fatalf("expected transport mixed, got %s", status.Singbox.Transport)
+	}
+	if status.Singbox.ProtocolProfile != "tcp_udp" {
+		t.Fatalf("expected protocol_profile tcp_udp, got %s", status.Singbox.ProtocolProfile)
+	}
+	if status.Singbox.PublicEndpointHost != "node1.example.com" {
+		t.Fatalf("expected public_endpoint_host node1.example.com, got %s", status.Singbox.PublicEndpointHost)
+	}
+	if status.Singbox.PublicEndpointPort != 8443 {
+		t.Fatalf("expected public_endpoint_port 8443, got %d", status.Singbox.PublicEndpointPort)
+	}
+	if !status.Singbox.EndpointReady {
+		t.Fatal("expected endpoint_ready=true")
 	}
 }

@@ -92,3 +92,47 @@ func TestApply_CallbackError(t *testing.T) {
 		t.Fatal("expected error from callback")
 	}
 }
+
+func TestApply_RejectsInvalidPublicEndpointPort(t *testing.T) {
+	applier := NewRuntimeApplier(nil)
+	old := DefaultRuntimeConfig()
+	new := DefaultRuntimeConfig()
+	new.Singbox.PublicEndpointPort = 65536
+	err := applier.Apply(&old, &new)
+	if err == nil {
+		t.Fatal("expected error for public_endpoint_port > 65535")
+	}
+}
+
+func TestApply_RejectsInvalidTunMTU(t *testing.T) {
+	applier := NewRuntimeApplier(nil)
+	old := DefaultRuntimeConfig()
+	new := DefaultRuntimeConfig()
+	new.Singbox.TunMTU = 64
+	err := applier.Apply(&old, &new)
+	if err == nil {
+		t.Fatal("expected error for tun_mtu < 128")
+	}
+}
+
+func TestApply_AcceptsValidPublicEndpointPort(t *testing.T) {
+	applier := NewRuntimeApplier(nil)
+	old := DefaultRuntimeConfig()
+	new := DefaultRuntimeConfig()
+	new.Singbox.PublicEndpointPort = 443
+	err := applier.Apply(&old, &new)
+	if err != nil {
+		t.Fatalf("unexpected error for valid public_endpoint_port: %v", err)
+	}
+}
+
+func TestApply_AcceptsValidTunMTU(t *testing.T) {
+	applier := NewRuntimeApplier(nil)
+	old := DefaultRuntimeConfig()
+	new := DefaultRuntimeConfig()
+	new.Singbox.TunMTU = 9000
+	err := applier.Apply(&old, &new)
+	if err != nil {
+		t.Fatalf("unexpected error for valid tun_mtu: %v", err)
+	}
+}

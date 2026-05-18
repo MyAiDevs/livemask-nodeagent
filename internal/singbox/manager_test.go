@@ -418,3 +418,158 @@ func TestManager_StopDeadProcess(t *testing.T) {
 		t.Fatalf("expected stopped, got %s", s.Status)
 	}
 }
+
+func TestManager_EndpointReadyDisabled(t *testing.T) {
+	cfg := &SingboxConfig{Enabled: false, ListenPort: 10808}
+	mgr := NewManager(cfg)
+	mgr.HealthCheck()
+	s := mgr.Status()
+	if s.EndpointReady {
+		t.Fatal("expected endpoint_ready=false when disabled")
+	}
+}
+
+func TestManager_EndpointReadyNoProcess(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &SingboxConfig{
+		Enabled:            true,
+		ConfigPath:         filepath.Join(dir, "singbox.json"),
+		ListenHost:         "127.0.0.1",
+		ListenPort:         10808,
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 443,
+	}
+	mgr := NewManager(cfg)
+	mgr.HealthCheck()
+	s := mgr.Status()
+	if s.EndpointReady {
+		t.Fatal("expected endpoint_ready=false when process not started")
+	}
+}
+
+func TestManager_RuntimeStatusNewFields(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &SingboxConfig{
+		Enabled:            true,
+		ConfigPath:         filepath.Join(dir, "singbox.json"),
+		ListenHost:         "0.0.0.0",
+		ListenPort:         10808,
+		Transport:          "mixed",
+		ProtocolProfile:    "tcp_udp",
+		PublicEndpointHost: "node1.example.com",
+		PublicEndpointPort: 8443,
+	}
+	mgr := NewManager(cfg)
+	s := mgr.Status()
+
+	if s.Transport != "mixed" {
+		t.Fatalf("expected transport mixed, got %s", s.Transport)
+	}
+	if s.ProtocolProfile != "tcp_udp" {
+		t.Fatalf("expected protocol_profile tcp_udp, got %s", s.ProtocolProfile)
+	}
+	if s.PublicEndpointHost != "node1.example.com" {
+		t.Fatalf("expected public_endpoint_host node1.example.com, got %s", s.PublicEndpointHost)
+	}
+	if s.PublicEndpointPort != 8443 {
+		t.Fatalf("expected public_endpoint_port 8443, got %d", s.PublicEndpointPort)
+	}
+	if s.EndpointReady {
+		t.Fatal("expected endpoint_ready=false initially")
+	}
+}
+
+func TestManager_HealthCheckPublicEndpointValid(t *testing.T) {
+	dir := t.TempDir()
+	markerFile := filepath.Join(dir, ".singbox-running")
+	binPath := fakeSingboxScript(t, dir, markerFile)
+	cfgPath := filepath.Join(dir, "singbox.json")
+
+	cfg := &SingboxConfig{
+		Enabled:            true,
+		BinPath:            binPath,
+		ConfigPath:         cfgPath,
+		WorkDir:            dir,
+		LogPath:            filepath.Join(dir, "singbox.log"),
+		ListenHost:         "127.0.0.1",
+		ListenPort:         10808,
+		PublicEndpointHost: "node.example.com",
+		PublicEndpointPort: 443,
+		Transport:          "mixed",
+	}
+	if err := Render(cfg); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	mgr := NewManager(cfg)
+	ctx := context.Background()
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Health check with fake binary: process alive but port unreachable.
+	mgr.HealthCheck()
+	s := mgr.Status()
+	// Fake binary doesn't open a real port, so status is unhealthy.
+	if s.Status != string(StatusUnhealthy) {
+		t.Fatalf("expected unhealthy (fake binary no real port), got %s", s.Status)
+	}
+	if s.Transport != "mixed" {
+		t.Fatalf("expected transport mixed, got %s", s.Transport)
+	}
+	if s.PublicEndpointHost != "node.example.com" {
+		t.Fatalf("expected public_endpoint_host, got %s", s.PublicEndpointHost)
+	}
+	if s.PublicEndpointPort != 443 {
+		t.Fatalf("expected public_endpoint_port 443, got %d", s.PublicEndpointPort)
+	}
+	if s.EndpointReady {
+		t.Fatal("expected endpoint_ready=false (port unreachable)")
+	}
+}
+
+func TestManager_ApplyConfigPropagatesSchema(t *testing.T) {
+	dir := t.TempDir()
+	markerFile := filepath.Join(dir, ".singbox-running")
+	binPath := fakeSingboxScript(t, dir, markerFile)
+	cfgPath := filepath.Join(dir, "singbox.json")
+
+	cfg := &SingboxConfig{
+		Enabled:               true,
+		BinPath:               binPath,
+		ConfigPath:            cfgPath,
+		WorkDir:               dir,
+		ListenHost:            "127.0.0.1",
+		ListenPort:            10808,
+		Transport:             "mixed",
+		DNSEnabled:            true,
+		RouteGlobal:           false,
+		BypassLAN:             true,
+		RestartOnConfigChange: true,
+	}
+
+	mgr := NewManager(cfg)
+	ctx := context.Background()
+
+	if err := mgr.ApplyConfig(ctx, cfg, "hash-1"); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	s := mgr.Status()
+	if s.Status != string(StatusRunning) {
+		t.Fatalf("expected running, got %s", s.Status)
+	}
+
+	// Update config with new transport.
+	cfg.Transport = "tun"
+	cfg.TunInterfaceName = "tun0"
+	cfg.TunMTU = 9000
+	if err := mgr.ApplyConfig(ctx, cfg, "hash-2"); err != nil {
+		t.Fatalf("ApplyConfig hash-2: %v", err)
+	}
+
+	// Verify new fields in runtime status.
+	s = mgr.Status()
+	if s.Transport != "tun" {
+		t.Fatalf("expected transport tun, got %s", s.Transport)
+	}
+}

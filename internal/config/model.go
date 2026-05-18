@@ -47,6 +47,18 @@ type SingboxConfig struct {
 	ListenHost                string `json:"listen_host,omitempty"`
 	ListenPort                int    `json:"listen_port,omitempty"`
 	LogLevel                  string `json:"log_level,omitempty"`
+	Transport                 string `json:"transport,omitempty"`
+	ProtocolProfile           string `json:"protocol_profile,omitempty"`
+	PublicEndpointHost        string `json:"public_endpoint_host,omitempty"`
+	PublicEndpointPort        int    `json:"public_endpoint_port,omitempty"`
+	TunInterfaceName          string `json:"tun_interface_name,omitempty"`
+	TunMTU                    int    `json:"tun_mtu,omitempty"`
+	DNSEnabled                bool   `json:"dns_enabled"`
+	DNSStrategy               string `json:"dns_strategy,omitempty"`
+	DNSServers                string `json:"dns_servers,omitempty"` // comma-separated, e.g. "1.1.1.1,8.8.8.8"
+	RouteGlobal               bool   `json:"route_global"`
+	BypassLAN                 bool   `json:"bypass_lan"`
+	ProxyOutboundTag          string `json:"proxy_outbound_tag,omitempty"`
 }
 
 // DefaultRuntimeConfig returns a safe default configuration.
@@ -67,6 +79,13 @@ func DefaultRuntimeConfig() RuntimeConfig {
 			ListenHost:                "127.0.0.1",
 			ListenPort:                10808,
 			LogLevel:                  "info",
+			Transport:                 "mixed",
+			ProtocolProfile:           "tcp_udp",
+			DNSEnabled:                true,
+			DNSStrategy:               "prefer_ipv4",
+			DNSServers:                "1.1.1.1,8.8.8.8",
+			RouteGlobal:               false,
+			BypassLAN:                 true,
 		},
 	}
 }

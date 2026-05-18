@@ -106,23 +106,55 @@ func main() {
 			old.Singbox.ListenHost, new.Singbox.ListenHost)
 		log.Printf("[config]   singbox.listen_port:        %d -> %d",
 			old.Singbox.ListenPort, new.Singbox.ListenPort)
+		log.Printf("[config]   singbox.transport:          %s -> %s",
+			old.Singbox.Transport, new.Singbox.Transport)
+		log.Printf("[config]   singbox.protocol_profile:   %s -> %s",
+			old.Singbox.ProtocolProfile, new.Singbox.ProtocolProfile)
 		log.Printf("[config]   singbox.health_check:       %d -> %d",
 			old.Singbox.HealthCheckTimeoutSeconds, new.Singbox.HealthCheckTimeoutSeconds)
+		log.Printf("[config]   singbox.route_global:       %t -> %t",
+			old.Singbox.RouteGlobal, new.Singbox.RouteGlobal)
+		log.Printf("[config]   singbox.bypass_lan:         %t -> %t",
+			old.Singbox.BypassLAN, new.Singbox.BypassLAN)
 		log.Printf("[config] **** Config applied successfully ****")
 
 		// Propagate config center values into sing-box runtime config.
 		singboxCfg.ListenHost = new.Singbox.ListenHost
 		singboxCfg.ListenPort = new.Singbox.ListenPort
 		singboxCfg.LogLevel = new.Singbox.LogLevel
+		singboxCfg.Transport = new.Singbox.Transport
+		singboxCfg.ProtocolProfile = new.Singbox.ProtocolProfile
+		singboxCfg.PublicEndpointHost = new.Singbox.PublicEndpointHost
+		singboxCfg.PublicEndpointPort = new.Singbox.PublicEndpointPort
+		singboxCfg.TunInterfaceName = new.Singbox.TunInterfaceName
+		singboxCfg.TunMTU = new.Singbox.TunMTU
+		singboxCfg.DNSEnabled = new.Singbox.DNSEnabled
+		singboxCfg.DNSStrategy = new.Singbox.DNSStrategy
+		singboxCfg.RouteGlobal = new.Singbox.RouteGlobal
+		singboxCfg.BypassLAN = new.Singbox.BypassLAN
+		singboxCfg.ProxyOutboundTag = new.Singbox.ProxyOutboundTag
+
+		// Parse comma-separated DNS servers.
+		if new.Singbox.DNSServers != "" {
+			parts := strings.Split(new.Singbox.DNSServers, ",")
+			var servers []string
+			for _, p := range parts {
+				s := strings.TrimSpace(p)
+				if s != "" {
+					servers = append(servers, s)
+				}
+			}
+			if len(servers) > 0 {
+				singboxCfg.DNSServers = servers
+			}
+		}
 		_ = old
 
 		// Apply/render sing-box config if enabled.
-		// Use a short timeout for config application.
 		applyCtx, applyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer applyCancel()
 		if err := singboxMgr.ApplyConfig(applyCtx, singboxCfg, ""); err != nil {
 			log.Printf("[config] singbox apply failed (continuing): %v", err)
-			// Return error so config manager enters degraded mode.
 			return fmt.Errorf("singbox apply: %w", err)
 		}
 		return nil

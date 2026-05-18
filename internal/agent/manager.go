@@ -192,17 +192,22 @@ func (m *Manager) getSingboxRuntimeStatus() *SingboxRuntimeStatus {
 	}
 	s := m.singboxProvider.Status()
 	return &SingboxRuntimeStatus{
-		Enabled:           s.Enabled,
-		Status:            s.Status,
-		PID:               s.PID,
-		ConfigPath:        s.ConfigPath,
-		ListenHost:        s.ListenHost,
-		ListenPort:        s.ListenPort,
-		LastStartedAt:     s.LastStartedAt,
-		LastStoppedAt:     s.LastStoppedAt,
-		LastHealthCheckAt: s.LastHealthCheckAt,
-		LastError:         s.LastError,
-		RestartCount:      s.RestartCount,
+		Enabled:            s.Enabled,
+		Status:             s.Status,
+		PID:                s.PID,
+		ConfigPath:         s.ConfigPath,
+		ListenHost:         s.ListenHost,
+		ListenPort:         s.ListenPort,
+		Transport:          s.Transport,
+		ProtocolProfile:    s.ProtocolProfile,
+		PublicEndpointHost: s.PublicEndpointHost,
+		PublicEndpointPort: s.PublicEndpointPort,
+		EndpointReady:      s.EndpointReady,
+		LastStartedAt:      s.LastStartedAt,
+		LastStoppedAt:      s.LastStoppedAt,
+		LastHealthCheckAt:  s.LastHealthCheckAt,
+		LastError:          s.LastError,
+		RestartCount:       s.RestartCount,
 	}
 }
 

@@ -66,6 +66,20 @@ func (a *RuntimeApplier) Apply(old, new *RuntimeConfig) error {
 			}
 		}
 	}
+	if new.Singbox.PublicEndpointPort != 0 {
+		if new.Singbox.PublicEndpointPort < 1 || new.Singbox.PublicEndpointPort > 65535 {
+			return &ApplyError{
+				Field:   "singbox.public_endpoint_port",
+				Message: fmt.Sprintf("must be 1-65535, got %d", new.Singbox.PublicEndpointPort),
+			}
+		}
+	}
+	if new.Singbox.TunMTU != 0 && new.Singbox.TunMTU < 128 {
+		return &ApplyError{
+			Field:   "singbox.tun_mtu",
+			Message: fmt.Sprintf("must be >= 128, got %d", new.Singbox.TunMTU),
+		}
+	}
 
 	if a.onConfigChange == nil {
 		log.Printf("[config] dry-run: would apply config version (no callback registered)")
